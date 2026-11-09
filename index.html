@@ -47,7 +47,7 @@
 </div></div>
 <div id="start">
   <h1>🖐️ Hand Games</h1>
-  <p>Fruit Ninja, Tennis, a Jigsaw Puzzle and Tidy Up, played with your hands through the webcam.</p>
+  <p>Fruit Ninja, Tennis, a Jigsaw Puzzle, Tidy Up and Rock Paper Scissors, played with your hands through the webcam.</p>
   <p>It follows 3 fingertips: <span class="dot" style="background:#54a0ff"></span> thumb,
      <span class="dot" style="background:#feca57"></span> index and <span class="dot" style="background:#ff6b9d"></span> ring.</p>
   <div id="msg"></div>
@@ -92,7 +92,7 @@ const SETTING_DEFS = [
     names: ['0.6 s', '0.8 s', '1 s', '1.3 s', '1.6 s'] },
 ];
 const SETTINGS_KEY = 'handgames_settings';
-function defaultSettings() { const s = { ninjaHands: 1, tidyOutlines: false }; SETTING_DEFS.forEach(d => { s[d.key] = 2; }); return s; }
+function defaultSettings() { const s = { ninjaHands: 1, tidyOutlines: false, rpsSmart: false }; SETTING_DEFS.forEach(d => { s[d.key] = 2; }); return s; }
 let settings = defaultSettings();
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch (e) {}
 function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {} }
@@ -212,6 +212,11 @@ const SFX = {
   drop:    () => tone(330, 0.07, 'sine', 0.2),
   snap:    () => { tone(880, 0.18, 'sine', 0.3); tone(1320, 0.25, 'sine', 0.2, 0.05); },
   whoosh:  () => noise(0.6, 0.35, 'bandpass', 500, 2600),
+  beat:    () => { tone(150, 0.12, 'sine', 0.5, 0, 70); noise(0.06, 0.25, 'lowpass', 900); },      // "Rock… Paper… Scissors…"
+  shoot:   () => { tone(220, 0.16, 'sine', 0.55, 0, 90); tone(880, 0.12, 'triangle', 0.18, 0.02); },
+  rwin:    () => [784, 1047, 1319].forEach((f, i) => tone(f, 0.14, 'triangle', 0.26, i * 0.07)),
+  rlose:   () => tone(330, 0.35, 'sawtooth', 0.12, 0, 140),
+  tie:     () => { tone(587, 0.12, 'sine', 0.2); tone(587, 0.12, 'sine', 0.2, 0.14); },
 };
 function sfx(name) {
   if (!actx || !soundOn || !SFX[name]) return;
@@ -239,7 +244,7 @@ let trails = {};        // one per fingertip: recent positions, for the blade tr
 let segQueue = [];      // fingertip movements since the last frame (used for slicing)
 let tracks = [];        // hands being followed from one camera frame to the next
 let nextId = 1;
-let lastResultAt = 0;
+let lastResultAt = 0, resultSeq = 0;   // resultSeq counts the tracker's answers (one per camera frame it looked at)
 let fpsCount = 0, fpsStart = 0, trackFps = 0;
 
 // Smoothing ("One Euro" filter): steady when the hand is still, almost no lag when it moves fast
@@ -293,6 +298,37 @@ function curlOf(q) {
 // How close the thumb tip and index tip are, compared with the size of the hand. Pinch ≈ 0.1–0.2, open ≈ 0.6+
 function pinchOf(q) { return dist3(q[4], q[8]) / Math.max(1e-6, dist3(q[0], q[9])); }
 
+// Hand shape for Rock Paper Scissors: ✊ rock, ✋ paper, ✌️ scissors (or null = none of them).
+// How straight each finger is comes from two measures, tuned on ~10,000 real hand poses from public datasets:
+//   1. fingertip-to-wrist distance vs middle-joint-to-wrist distance (a folded fingertip comes back towards the wrist)
+//   2. how much the finger bends in total at its 3 joints
+// Both work whichever way the hand is turned. The thumb is ignored, as people hold it in different ways.
+const SHAPE_FINGERS = [[8, 7, 6, 5], [12, 11, 10, 9], [16, 15, 14, 13], [20, 19, 18, 17]];   // tip, top joint, middle joint, knuckle
+const SHAPE_REACH = [1.16, 1.05, 1.05, 1.14], SHAPE_BEND = [79.5, 130.4, 138.2, 139.5];      // index, middle, ring, pinky
+function bendAt(a, b, c) {                    // angle in degrees between a→b and b→c (0 = straight on)
+  const ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - b.x, vy = c.y - b.y, vz = c.z - b.z;
+  const d = Math.hypot(ux, uy, uz) * Math.hypot(vx, vy, vz);
+  return d ? Math.acos(clamp((ux * vx + uy * vy + uz * vz) / d, -1, 1)) * 180 / Math.PI : 0;
+}
+function fingerStraightness(q) {              // one number per finger: above 0 = straight, below 0 = folded
+  return SHAPE_FINGERS.map((f, k) => {
+    const t = q[f[0]], d = q[f[1]], p = q[f[2]], m = q[f[3]], w = q[0];
+    const reach = dist3(t, w) / Math.max(1e-6, dist3(p, w));
+    const bend = bendAt(w, m, p) + bendAt(m, p, d) + bendAt(p, d, t);
+    return ((reach - SHAPE_REACH[k]) / 0.25 + (SHAPE_BEND[k] - bend) / 60) / 2;
+  });
+}
+function shapeOf(q) {
+  const s = fingerStraightness(q), m = 0.1;
+  if (s[0] > m && s[1] > m) {                 // index and middle finger straight
+    if (s[2] > m && s[3] > -0.5) return 'paper';
+    if (s[2] < -m && s[3] < m) return 'scissors';
+    return null;
+  }
+  if (s[0] < -m && s[1] < -m && s[2] < -m) return 'rock';
+  return null;
+}
+
 // Fist or open hand. The two thresholds are apart, and it takes 2 frames in a row to switch, so it doesn't flicker.
 function updateGrip(tr, curl) {
   tr.curl = curl;
@@ -331,7 +367,8 @@ function moveTrack(tr, raw, t) {
 
 function rebuildTips() {
   tips = tracks.map(tr => ({ id: tr.id, x: tr.c.x, y: tr.c.y, fingers: tr.fingers, pts: tr.pts, assisted: tr.assisted,
-                             palm: tr.palmS, grab: !!tr.fist, pinch: !!tr.pinch, pinchPt: tr.pinchPt, curl: tr.curl, pinchR: tr.pinchR }));
+                             palm: tr.palmS, grab: !!tr.fist, pinch: !!tr.pinch, pinchPt: tr.pinchPt, curl: tr.curl, pinchR: tr.pinchR,
+                             shape: tr.lost ? null : tr.shape }));
 }
 
 // Forget hands that have been missing for too long
@@ -355,7 +392,7 @@ function onResults(res) {
 
   const found = (res.multiHandLandmarks || []).map(lms => {
     const pts = lms.map(toScreen), q = camPts(lms);
-    return { pts: pts, palm: avgOf([pts[0], pts[5], pts[9], pts[13], pts[17]]), curl: curlOf(q), pinch: pinchOf(q) };
+    return { pts: pts, palm: avgOf([pts[0], pts[5], pts[9], pts[13], pts[17]]), curl: curlOf(q), pinch: pinchOf(q), shape: shapeOf(q) };
   });
 
   // Match each hand found to a hand we were already following, by palm position.
@@ -375,7 +412,7 @@ function onResults(res) {
       tracks.push(best);
     }
     matched.push(best);
-    best.palm = h.palm; best.pts = h.pts; best.seen = t;
+    best.palm = h.palm; best.pts = h.pts; best.seen = t; best.shape = h.shape;
     best.lost = false; best.assisted = false; best.ref = null;
     best.palmS = { x: smooth(best.pf.x, h.palm.x, t), y: smooth(best.pf.y, h.palm.y, t) };   // steady hand position (puzzle)
     updateGrip(best, h.curl);
@@ -388,6 +425,7 @@ function onResults(res) {
   pruneTracks(t);
   rebuildTips();
   lastResultAt = performance.now();
+  resultSeq++;
 }
 
 // ================= MOTION ASSIST (Fruit Ninja) =================
@@ -556,7 +594,7 @@ function drawButtons(dt) {
 }
 
 // ================= SCREENS =================
-let state = 'menu';    // menu | options | settings | check | scores | ninja | tennis | puzzle | tidy | over
+let state = 'menu';    // menu | options | settings | check | scores | ninja | tennis | puzzle | tidy | rps | over
 let overInfo = null;   // game-over screen: { game, title, lines, again }
 let screenAt = 0;      // when the current screen appeared
 let banner = null;     // short how-to-play line at the start of a game
@@ -570,7 +608,7 @@ function showBanner(t) { banner = { text: t, life: 3.5 }; }
 function showToast(t) { toast = { text: t, life: 2.5 }; }
 
 // ================= PAUSE =================
-const GAME_STATES = ['ninja', 'tennis', 'puzzle', 'tidy'];
+const GAME_STATES = ['ninja', 'tennis', 'puzzle', 'tidy', 'rps'];
 let paused = null, lastHandAt = 0;           // paused = { why: 'auto' | 'manual', at, seenAt }
 const pauseBtn = document.getElementById('pauseBtn');
 function pauseGame(why) { if (paused || GAME_STATES.indexOf(state) < 0) return; paused = { why: why, at: secs(), seenAt: 0 }; }
@@ -616,6 +654,8 @@ const BOARDS = {
   tidy_6:        { title: '🧹 Tidy Up: Easy', high: false, fmt: v => fmtTime(v) },
   tidy_10:       { title: '🧹 Tidy Up: Normal', high: false, fmt: v => fmtTime(v) },
   tidy_16:       { title: '🧹 Tidy Up: Hard', high: false, fmt: v => fmtTime(v) },
+  rps_survival:  { title: '✌️ Rock Paper Scissors: Survival', high: true, fmt: v => v + (v === 1 ? ' win' : ' wins') },
+  rps_smart:     { title: '🧠 Rock Paper Scissors: Survival vs smart', high: true, fmt: v => v + (v === 1 ? ' win' : ' wins') },
 };
 const BOARD_ORDER = Object.keys(BOARDS);
 function boardGet(k) { try { return JSON.parse(load('handgames_board_' + k) || '[]'); } catch (e) { return []; } }
@@ -717,7 +757,7 @@ function settingsDraw() {
                                 W / 2, y + 12, 14, 'rgba(255,255,255,.75)', colW, 19);
   const bw = Math.min(200, colW * 0.45), bh = 52, by = y + 44;
   addButton('s_reset', 'Reset', W / 2 - bw - 8, by, bw, bh, () => {
-    const keep = { ninjaHands: settings.ninjaHands, tidyOutlines: settings.tidyOutlines };
+    const keep = { ninjaHands: settings.ninjaHands, tidyOutlines: settings.tidyOutlines, rpsSmart: settings.rpsSmart };
     settings = Object.assign(defaultSettings(), keep); saveSettings(); showToast('Back to the normal settings');
   });
   addButton('s_back', '← Back', W / 2 + 8, by, bw, bh, () => settingsBack());
@@ -828,6 +868,17 @@ function tidyOptions() {
     { label: settings.tidyOutlines ? '✏️ Outlines: ON' : '✏️ Outlines: OFF',
       act: () => { settings.tidyOutlines = !settings.tidyOutlines; saveSettings(); tidyOptions(); } }],
     note: 'You get ' + TIDY_MEMO + ' seconds to remember the tidy room, then things get thrown around. Outlines show faint shapes where things go. Stuck? Press 👀 Peek.' });
+}
+function rpsOptions() {
+  showOptions({ id: 'r', title: '✌️ Rock Paper Scissors', items: [
+    { label: 'Best of 3 (first to 2)', act: () => startRps('bo3') },
+    { label: 'Best of 5 (first to 3)', act: () => startRps('bo5') },
+    { label: '❤️ Survival: 3 lives', act: () => startRps('survival') },
+    { label: settings.rpsSmart ? '🧠 Smart computer: ON' : '🎲 Smart computer: OFF',
+      act: () => { settings.rpsSmart = !settings.rpsSmart; saveSettings(); rpsOptions(); } }],
+    note: (mode === 'hand' ? 'Make a fist ✊ to start each round. On “Shoot!”, show ✊ ✋ or ✌️ with your palm towards the camera. '
+                           : 'Tap ✊ ✋ or ✌️ to throw. ') +
+          'The computer picks before you throw, so it can\'t cheat. The smart computer learns your habits as you play.' });
 }
 photoInput.addEventListener('change', () => {
   const f = photoInput.files && photoInput.files[0];
@@ -1661,18 +1712,247 @@ function tidyDraw() {
   }
 }
 
+// ================= ROCK PAPER SCISSORS (you vs the computer) =================
+const RPS_KEYS = ['rock', 'paper', 'scissors'];
+const RPS_EMOJI = { rock: '✊', paper: '✋', scissors: '✌️' };
+const RPS_BEATS = { rock: 'scissors', paper: 'rock', scissors: 'paper' };          // what each one beats
+const RPS_HOW = { rock: 'Rock crushes scissors', paper: 'Paper covers rock', scissors: 'Scissors cut paper' };
+const RPS_WORDS = ['Rock…', 'Paper…', 'Scissors…', 'Shoot!'];
+const RPS_BEAT = 0.6, RPS_BEAT_TOUCH = 0.32;  // seconds between "Rock", "Paper", "Scissors" and "Shoot!"
+const RPS_READ = [0.25, 0.8, 2.2];   // after "Shoot!": start reading your hand, decide, give up and ask again
+const RPS_FIST = 0.35;               // hold a fist this long to start a round
+const RPS_SHOW = 2.2;                // seconds the result stays up
+let R = null;
+let rpsHistory = [];                 // every round since the page was opened (the smart computer learns from it)
+
+function startRps(kind) {
+  R = { kind: kind, smart: !!settings.rpsSmart, need: kind === 'bo5' ? 3 : kind === 'bo3' ? 2 : 0,
+        you: 0, cpu: 0, lives: 3, wins: 0, streak: 0, bestStreak: 0, round: 1,
+        throws: { rock: 0, paper: 0, scissors: 0 }, phase: 'ready', clock: 0, phaseAt: 0, fistT: 0, beat: -1,
+        cpuPick: null, cpuWhy: '', yourPick: null, samples: [], seq: resultSeq, live: null, result: null,
+        pop: 0, flash: 0, flashRGB: '29,209,161', parts: [] };
+  setMaxHands(1);
+  setScreen('rps');
+}
+function rpsPhase(p) { R.phase = p; R.phaseAt = R.clock; }
+
+// The computer's throw for a round. It's picked when the countdown starts, before you throw, from earlier rounds only.
+// Normal: random. Smart: guesses your throw from your habits and plays what beats it. It looks at what you play
+// most, what you play after each throw, after winning or losing, and after the computer's last throw, and trusts
+// whichever of those has been guessing right lately. It still plays at random 1 time in 5.
+function rpsCpuPick() {
+  const random = { pick: RPS_KEYS[Math.floor(Math.random() * 3)], why: 'random' };
+  if (!R.smart || rpsHistory.length < 3 || Math.random() < 0.2) return random;
+  const g = rpsPredict(rpsHistory);
+  if (g === null) return random;
+  return { pick: RPS_KEYS.find(k => RPS_BEATS[k] === RPS_KEYS[g]), why: 'smart' };
+}
+function rpsPredict(hist) {                   // hist: [{ p: your throw, c: computer's, o: 1 you won / 0 tie / -1 lost }], throws as 0 1 2
+  const P = [
+    () => 'all',                                                     // what you play most
+    i => i >= 1 ? 'a' + hist[i - 1].p : null,                        // after your last throw
+    i => i >= 2 ? 'b' + hist[i - 2].p + hist[i - 1].p : null,        // after your last two throws
+    i => i >= 1 ? 'o' + hist[i - 1].o + hist[i - 1].p : null,        // after winning / tying / losing with a throw
+    i => i >= 1 ? 'c' + hist[i - 1].c : null,                        // after the computer's last throw
+  ].map(f => ({ key: f, counts: {}, score: 0, guess: null }));
+  const top = row => { if (!row) return null; let b = 0, bi = null; row.forEach((v, j) => { if (v > b + 1e-9) { b = v; bi = j; } }); return bi; };
+  for (let i = 0; i <= hist.length; i++) {
+    P.forEach(pr => {
+      const k = pr.key(i);
+      pr.guess = k === null ? null : top(pr.counts[k]);
+      if (i === hist.length || k === null) return;
+      if (pr.guess !== null) pr.score = pr.score * 0.85 + (pr.guess === hist[i].p ? 1 : -0.5);   // random guessing scores 0 on average
+      const row = pr.counts[k] || (pr.counts[k] = [0, 0, 0]);
+      for (let j = 0; j < 3; j++) row[j] *= 0.9;                     // recent rounds count more
+      row[hist[i].p] += 1;
+    });
+  }
+  let best = null;
+  P.forEach(pr => { if (pr.guess !== null && pr.score > 0.5 && (!best || pr.score > best.score)) best = pr; });
+  return best ? best.guess : null;
+}
+
+function rpsCount(pick) {                     // start the countdown (the computer chooses now)
+  const c = rpsCpuPick();
+  R.cpuPick = c.pick; R.cpuWhy = c.why; R.yourPick = pick || null;
+  R.samples = []; R.beat = -1; R.fistT = 0; R.result = null;
+  rpsPhase('count');
+}
+// Your throw: the last shape the camera saw twice in a row after "Shoot!", so a hand still changing shape doesn't count.
+// With a slow camera (only a few readings), one clear reading is enough.
+function rpsReadThrow(final) {
+  const s = R.samples;
+  for (let i = s.length - 1; i >= 1; i--) if (s[i].s && s[i].s === s[i - 1].s) return s[i].s;
+  if (final || s.filter(x => x.s).length < 3) for (let i = s.length - 1; i >= 0; i--) if (s[i].s) return s[i].s;
+  return null;
+}
+function rpsReveal(you) {
+  const cpu = R.cpuPick, o = you === cpu ? 0 : RPS_BEATS[you] === cpu ? 1 : -1;
+  R.throws[you]++;
+  rpsHistory.push({ p: RPS_KEYS.indexOf(you), c: RPS_KEYS.indexOf(cpu), o: o });
+  if (rpsHistory.length > 300) rpsHistory.shift();
+  if (o === 1) { R.you++; R.wins++; R.streak++; R.bestStreak = Math.max(R.bestStreak, R.streak); }
+  else if (o === -1) { R.cpu++; R.streak = 0; if (R.kind === 'survival') R.lives--; }
+  R.result = { you: you, cpu: cpu, o: o, line: o === 1 ? RPS_HOW[you] : o === -1 ? RPS_HOW[cpu] : 'Same throw',
+               quip: o === -1 && R.cpuWhy === 'smart' ? '🧠 Saw that coming!' : '' };
+  R.pop = 1; R.flash = o ? 0.8 : 0; R.flashRGB = o === 1 ? '29,209,161' : '255,90,90';
+  sfx(o === 1 ? 'rwin' : o === -1 ? 'rlose' : 'tie');
+  rpsPhase('reveal');
+}
+function rpsMatchOver() { return R.kind === 'survival' ? R.lives <= 0 : R.you >= R.need || R.cpu >= R.need; }
+function rpsConfetti() {
+  const cols = ['#feca57', '#ff6b9d', '#54a0ff', '#1dd1a1', '#a29bfe', '#ff9f43'];
+  for (let i = 0; i < 140; i++) R.parts.push({ x: rand(0, W), y: -rand(10, H * 0.4), vx: rand(-60, 60), vy: rand(90, 260),
+    r: rand(4, 8), c: cols[i % cols.length], rot: rand(0, 6), vr: rand(-6, 6), life: rand(2.5, 4) });
+}
+function rpsOver() {
+  const kind = R.kind, t = R.throws;
+  const throwsLine = 'Your throws:  ✊ ' + t.rock + '   ✋ ' + t.paper + '   ✌️ ' + t.scissors;
+  if (kind === 'survival') {
+    overInfo = { game: 'rps', title: R.wins ? '❤️ Out of lives! You won ' + R.wins + (R.wins === 1 ? ' round' : ' rounds') : '❤️ Out of lives',
+                 lines: ['Best streak: ' + R.bestStreak + (R.bestStreak >= 2 ? ' 🔥' : ''), throwsLine], again: () => startRps(kind),
+                 hs: R.wins > 0 ? { k: R.smart ? 'rps_smart' : 'rps_survival', v: R.wins } : null };
+    if (R.wins >= 5) rpsConfetti();
+    sfx(R.wins >= 3 ? 'win' : 'lose');
+  } else {
+    const won = R.you > R.cpu;
+    overInfo = { game: 'rps', title: won ? '🏆 You win the match!' : '🤖 The computer wins', again: () => startRps(kind),
+                 lines: ['You ' + R.you + '  –  ' + R.cpu + ' Computer', throwsLine] };
+    if (won) rpsConfetti();
+    sfx(won ? 'win' : 'lose');
+  }
+  finishOver();
+}
+
+function rpsUpdate(dt) {
+  R.clock += Math.min(0.25, Math.max(dt, realDt));   // real time, so the "Rock… Paper… Scissors…" beat keeps its pace on a slow computer
+  const since = R.clock - R.phaseAt;
+  const tr = mode === 'hand' ? tracks.find(x => !x.lost) || null : null;   // the hand the camera sees right now
+  R.live = tr ? tr.shape : null;
+  const fresh = R.seq !== resultSeq;          // a new camera frame has been read since last time
+  R.seq = resultSeq;
+  R.flash = Math.max(0, R.flash - dt * 2);
+  R.pop = Math.max(0, R.pop - dt * 3);
+  if (R.phase === 'ready') {
+    if (mode !== 'hand') return;              // touch: waiting for a tap on ✊ ✋ ✌️
+    if (tr && (tr.shape === 'rock' || tr.fist)) R.fistT += dt; else R.fistT = 0;
+    if (R.fistT >= RPS_FIST) rpsCount();
+  } else if (R.phase === 'count') {
+    const beat = mode === 'hand' ? RPS_BEAT : RPS_BEAT_TOUCH;
+    const n = Math.min(3, Math.floor(since / beat));          // 0 Rock, 1 Paper, 2 Scissors, 3 Shoot!
+    if (n > R.beat) { R.beat = n; sfx(n === 3 ? 'shoot' : 'beat'); }
+    const ts = since - 3 * beat;                               // time since "Shoot!"
+    if (ts < 0) return;
+    if (mode !== 'hand') { rpsReveal(R.yourPick); return; }
+    if (fresh && ts >= RPS_READ[0]) R.samples.push({ t: ts, s: tr ? tr.shape : null });
+    if (ts >= RPS_READ[1]) {
+      const got = rpsReadThrow(ts >= RPS_READ[2]);
+      if (got) rpsReveal(got);
+      else if (ts >= RPS_READ[2]) rpsPhase('retry');           // didn't see a shape: this round doesn't count
+    }
+  } else if (R.phase === 'reveal') {
+    if (since >= RPS_SHOW) {
+      if (rpsMatchOver()) rpsOver();
+      else { R.round++; rpsPhase('ready'); }
+    }
+  } else if (R.phase === 'retry' && since >= 1.6) rpsPhase('ready');
+}
+function rpsFx(dt) {
+  R.parts.forEach(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt; p.life -= dt * (p.y > H ? 3 : 0.35); });
+  R.parts = R.parts.filter(p => p.life > 0);
+}
+
+function rpsHand(e, x, y, r, alpha, scale) {
+  ctx.save(); ctx.globalAlpha = alpha; ctx.translate(x, y); ctx.scale(scale, scale);
+  ctx.font = Math.round(r * 2) + 'px ' + EMOJI_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+  ctx.fillText(e, 0, 0); ctx.restore();
+}
+function rpsDraw() {
+  R.parts.forEach(p => {
+    ctx.save(); ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.c;
+    ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillRect(-p.r, -p.r * 0.4, p.r * 2, p.r * 0.8); ctx.restore();
+  });
+  if (state === 'over') return;
+  if (R.flash > 0) { ctx.fillStyle = 'rgba(' + R.flashRGB + ',' + (R.flash * 0.3) + ')'; ctx.fillRect(0, 0, W, H); }
+  const hand = mode === 'hand', since = R.clock - R.phaseAt, res = R.phase === 'reveal' ? R.result : null;
+  // scores
+  if (R.kind === 'survival') {
+    text('Wins ' + R.wins, 16, 70, 32, '#fff', 'left');
+    text('❤️'.repeat(Math.max(0, R.lives)) + '🖤'.repeat(Math.max(0, 3 - R.lives)), W - 16, 70, 26, '#fff', 'right');
+    if (R.streak >= 2) text('🔥 ' + R.streak + ' in a row', W / 2, 70, 20, '#feca57', 'center', 700);
+  } else {
+    const sz = Math.min(64, W * 0.1);
+    text(String(R.you), W * 0.25, 85, sz, '#54a0ff');
+    text(String(R.cpu), W * 0.75, 85, sz, '#ff9f43');
+    text('First to ' + R.need, W / 2, 85, 16, 'rgba(255,255,255,.75)', 'center', 600);
+  }
+  // the two hands: you on the left, the computer on the right
+  const r = clamp(Math.min(W, H) * 0.11, 38, 100), y = H * 0.4, xl = W * 0.25, xr = W * 0.75;
+  const beat = hand ? RPS_BEAT : RPS_BEAT_TOUCH;
+  const bob = R.phase === 'count' && since < 3 * beat ? Math.sin(Math.PI * ((since / beat) % 1)) * r * 0.45 : 0;   // fists pump on each beat
+  const pop = 1 + R.pop * 0.35;
+  const yours = res ? RPS_EMOJI[res.you] : hand ? (R.live ? RPS_EMOJI[R.live] : null) : R.phase === 'count' ? '✊' : null;
+  if (yours) rpsHand(yours, xl, y + (res ? 0 : bob), r, res || !hand ? 1 : 0.6, res ? pop : 1);
+  else {                                      // nothing recognised yet: an empty dashed circle
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 3; ctx.setLineDash([8, 8]);
+    ctx.beginPath(); ctx.arc(xl, y, r * 0.85, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    text('?', xl, y, r * 0.8, 'rgba(255,255,255,.45)', 'center', 800);
+  }
+  text('You', xl, y + r * 1.3, 17, '#54a0ff', 'center', 700);
+  // the computer shows a fist until your throw has been read, so it can't give its throw away
+  const shake = R.phase === 'count' && since >= 3 * beat ? Math.sin(R.clock * 45) * r * 0.06 : 0;
+  rpsHand(res ? RPS_EMOJI[res.cpu] : '✊', xr + shake, y + (res ? 0 : bob), r, 1, res ? pop : 1);
+  text('🤖 Computer' + (R.smart ? ' 🧠' : ''), xr, y + r * 1.3, 17, '#ff9f43', 'center', 700);
+  if (res && res.quip) text(res.quip, xr, y + r * 1.3 + 24, 15, '#feca57', 'center', 700);
+  text('VS', W / 2, y, Math.min(30, W * 0.06), 'rgba(255,255,255,.6)', 'center', 800);
+
+  // message under the hands
+  const big = Math.min(56, W * 0.1), my = y + r * 1.3 + 62, sub = my + big * 0.75 + 4;
+  if (R.phase === 'ready') {
+    if (!hand) {
+      text('Pick your throw', W / 2, my, big * 0.8, '#fff', 'center', 800);
+      const bw = Math.min(W * 0.92, 540), gap = 12, w = (bw - 2 * gap) / 3, bh = clamp(H * 0.12, 60, 90), by = Math.max(sub + 10, H - bh - 30);
+      RPS_KEYS.forEach((k, i) => addButton('rps_' + k, RPS_EMOJI[k] + ' ' + k[0].toUpperCase() + k.slice(1), (W - bw) / 2 + i * (w + gap), by, w, bh, () => rpsCount(k)));
+    } else if (!tracks.some(x => !x.lost)) {
+      text('Show your hand to the camera', W / 2, my, big * 0.7, '#fff', 'center', 800);
+      textWrap('Whole hand in view, palm towards the camera', W / 2, sub, 17, 'rgba(255,255,255,.85)', W * 0.9, 22, 600);
+    } else {
+      text(R.round === 1 ? 'Make a fist ✊ to start' : 'Fist ✊ for round ' + R.round, W / 2, my, big * 0.7, '#fff', 'center', 800);
+      const bw = Math.min(W * 0.5, 240);       // fills up while you hold the fist
+      ctx.fillStyle = 'rgba(255,255,255,.2)'; ctx.beginPath(); ctx.roundRect(W / 2 - bw / 2, sub - 6, bw, 12, 6); ctx.fill();
+      if (R.fistT > 0) { ctx.fillStyle = '#1dd1a1'; ctx.beginPath(); ctx.roundRect(W / 2 - bw / 2, sub - 6, Math.max(12, bw * Math.min(1, R.fistT / RPS_FIST)), 12, 6); ctx.fill(); }
+      if (R.round === 1) textWrap('Then on “Shoot!” show ✊ rock, ✋ paper or ✌️ scissors', W / 2, sub + 32, 16, 'rgba(255,255,255,.85)', W * 0.9, 21, 600);
+    }
+  } else if (R.phase === 'count') {
+    const n = Math.max(0, R.beat), f = clamp((since - n * beat) / beat, 0, 1);
+    ctx.save(); ctx.translate(W / 2, my); ctx.scale(1.25 - 0.25 * Math.min(1, f * 3), 1.25 - 0.25 * Math.min(1, f * 3));
+    text(RPS_WORDS[n], 0, 0, big, n === 3 ? '#feca57' : '#fff', 'center', 900);
+    ctx.restore();
+  } else if (res) {
+    text(res.o === 1 ? 'You win!' : res.o === -1 ? 'Computer wins' : 'Tie!', W / 2, my, big, res.o === 1 ? '#1dd1a1' : res.o === -1 ? '#ff6b6b' : '#feca57', 'center', 900);
+    text(res.line + (res.o === 0 && R.kind !== 'survival' ? '. Go again!' : ''), W / 2, sub, 19, '#fff', 'center', 600);
+  } else if (R.phase === 'retry') {
+    text('Didn\'t catch that 🙈', W / 2, my, big * 0.7, '#fff', 'center', 800);
+    textWrap('Show ✊ ✋ or ✌️ right after “Shoot!”, palm towards the camera', W / 2, sub, 16, 'rgba(255,255,255,.85)', W * 0.9, 21, 600);
+  }
+}
+
 // ================= MENU / GAME OVER / OVERLAYS =================
 function menuDraw() {
-  const big = Math.min(64, W * 0.11);
-  text('Hand Games', W / 2, H * 0.15, big, '#fff', 'center', 800);
+  const big = Math.min(64, W * 0.11), ty = H * 0.13;
+  text('Hand Games', W / 2, ty, big, '#fff', 'center', 800);
   textWrap(mode === 'hand' ? 'Pinch 🤏 a button, or hold a fingertip on it for 1 second' : 'Tap a game to start',
-           W / 2, H * 0.15 + big * 0.9, 17, 'rgba(255,255,255,.85)', W * 0.9, 22);
-  const bw = Math.min(W * 0.84, 440), bh = clamp(H * 0.09, 50, 66), gap = 14, x = (W - bw) / 2, y0 = H * 0.27;
-  addButton('m1', '🍉 Fruit Ninja', x, y0, bw, bh, ninjaOptions);
-  addButton('m2', '🎾 Tennis', x, y0 + bh + gap, bw, bh, tennisOptions);
-  addButton('m3', '🧩 Puzzle', x, y0 + 2 * (bh + gap), bw, bh, puzzleOptions);
-  addButton('m4', '🧹 Tidy Up', x, y0 + 3 * (bh + gap), bw, bh, tidyOptions);
-  const sy = y0 + 4 * (bh + gap), sbh = clamp(H * 0.065, 42, 50);
+           W / 2, ty + big * 0.85, 17, 'rgba(255,255,255,.85)', W * 0.9, 22);
+  const games = [['🍉 Fruit Ninja', ninjaOptions], ['🎾 Tennis', tennisOptions], ['🧩 Puzzle', puzzleOptions],
+                 ['🧹 Tidy Up', tidyOptions], ['✌️ Rock Paper Scissors', rpsOptions]];
+  const cols = W >= 720 ? 2 : 1, gap = 14;                 // two columns on wider screens
+  const bw = Math.min(W * (cols === 2 ? 0.9 : 0.84), cols === 2 ? 640 : 440), bh = clamp(H * (cols === 2 ? 0.09 : 0.075), 48, 66);
+  const x = (W - bw) / 2, y0 = Math.max(H * 0.22, ty + big * 0.85 + 34), cw = (bw - gap * (cols - 1)) / cols;
+  games.forEach((g, i) => {
+    const row = Math.floor(i / cols), alone = cols === 2 && i === games.length - 1 && games.length % 2 === 1;   // odd one out: centred
+    addButton('m' + (i + 1), g[0], alone ? x + (bw - cw) / 2 : x + (i % cols) * (cw + gap), y0 + row * (bh + gap), cw, bh, g[1]);
+  });
+  const sy = y0 + Math.ceil(games.length / cols) * (bh + gap), sbh = clamp(H * 0.065, 42, 50);
   const small = (mode === 'hand' ? [['🖐 Hand check', openHandCheck]] : []).concat([['⚙️ Settings', () => openSettings(goMenu)], ['🏆 Scores', openScores]]);
   const sw = (bw - 10 * (small.length - 1)) / small.length;
   small.forEach((sm, i) => addButton('ms' + i, sm[0], x + i * (sw + 10), sy, sw, sbh, sm[1]));
@@ -1680,7 +1960,11 @@ function menuDraw() {
   ['Fruit Ninja: swipe fast through the fruit. Classic, or 60-second Arcade.',
    'Tennis: play a friend or the computer. Move your hand up and down.',
    'Puzzle: make a fist over a piece to grab it, open your hand to drop it.',
-   'Tidy Up: remember the room, then put everything back where it belongs.'].forEach(s => {
+   'Tidy Up: remember the room, then put everything back where it belongs.',
+   'Rock Paper Scissors: beat the computer with your real hand shape.'].forEach(s => {
+    ctx.font = '500 15px ' + FONT;                         // only the lines that fit on the screen
+    const lines = Math.ceil(ctx.measureText(s).width / (W * 0.9) + 0.15);
+    if (y + lines * 20 > H - 8) return;
     y += textWrap(s, W / 2, y, 15, 'rgba(255,255,255,.75)', W * 0.9, 20) * 20 + 6;
   });
 }
@@ -1699,7 +1983,7 @@ function overDraw() {
 function drawBanner(dt) {
   if (!banner) return;
   banner.life -= dt;
-  if (banner.life <= 0 || ['ninja', 'tennis', 'puzzle', 'tidy'].indexOf(state) < 0) { banner = null; return; }
+  if (banner.life <= 0 || ['ninja', 'tennis', 'puzzle', 'tidy', 'rps'].indexOf(state) < 0) { banner = null; return; }
   ctx.save();
   ctx.globalAlpha = clamp(banner.life, 0, 1); ctx.shadowColor = 'rgba(0,0,0,.9)'; ctx.shadowBlur = 10;
   textWrap(banner.text, W / 2, state === 'puzzle' || state === 'tidy' ? H - 64 : H * 0.5 + (state === 'tennis' ? 30 : 0), 20, '#fff', W * 0.8, 26, 600);
@@ -1723,10 +2007,13 @@ const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,
 function drawPointers() {
   if (state === 'ninja') drawTrails();
   tips.forEach(tp => {
-    if (tp.pts && !tp.assisted && state !== 'ninja') {        // faint outline of the hand
-      ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2;
+    const rpsHand = state === 'rps' && tp.pts && !paused;      // (paused: normal dots, to press the pause buttons)
+    if (tp.pts && !tp.assisted && state !== 'ninja') {        // faint outline of the hand (Rock Paper Scissors: green when a shape is recognised)
+      ctx.strokeStyle = rpsHand ? (tp.shape ? 'rgba(29,209,161,.85)' : 'rgba(255,255,255,.6)') : 'rgba(255,255,255,.35)';
+      ctx.lineWidth = rpsHand ? 3 : 2;
       BONES.forEach(bn => { ctx.beginPath(); ctx.moveTo(tp.pts[bn[0]].x, tp.pts[bn[0]].y); ctx.lineTo(tp.pts[bn[1]].x, tp.pts[bn[1]].y); ctx.stroke(); });
     }
+    if (rpsHand) return;
     if ((state === 'puzzle' || state === 'tidy') && tp.pts) { // puzzle / tidy up: an open hand or a fist at the middle of your palm
       ctx.font = '44px ' + EMOJI_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(tp.grab ? '✊' : '✋', tp.palm.x, tp.palm.y);
@@ -1772,7 +2059,7 @@ function updateStatus() {
 }
 
 // ================= MAIN LOOP =================
-let lastFrame = performance.now(), frameErrors = 0;
+let lastFrame = performance.now(), frameErrors = 0, realDt = 0;   // realDt: seconds since the last frame, not capped
 function frame(dt) {
   if (mode === 'hand') { if (rafMotion) motionAssist(secs()); pruneTracks(secs()); }
   ctx.clearRect(0, 0, W, H);
@@ -1794,10 +2081,12 @@ function frame(dt) {
   else if (state === 'tennis') { if (run) tennisUpdate(dt); tennisDraw(); }
   else if (state === 'puzzle') { if (run) { puzzleUpdate(dt); puzzleFx(dt); } puzzleDraw(); }
   else if (state === 'tidy') { if (run) { tidyUpdate(dt); tidyFx(dt); } tidyDraw(); }
+  else if (state === 'rps') { if (run) { rpsUpdate(dt); rpsFx(dt); } rpsDraw(); }
   else if (state === 'over') {
     if (overInfo.game === 'ninja') { ninjaFx(dt); ninjaDraw(); }
     else if (overInfo.game === 'puzzle') { puzzleFx(dt); puzzleDraw(); }
     else if (overInfo.game === 'tidy') { tidyFx(dt); tidyDraw(); }
+    else if (overInfo.game === 'rps') { rpsFx(dt); rpsDraw(); }
     else tennisDraw();
     overDraw();
   }
@@ -1813,7 +2102,8 @@ function frame(dt) {
 }
 function loop() {
   const t = performance.now();
-  const dt = Math.min(0.05, (t - lastFrame) / 1000);
+  realDt = (t - lastFrame) / 1000;
+  const dt = Math.min(0.05, realDt);
   lastFrame = t;
   try { frame(dt); } catch (e) { if (frameErrors++ < 5) console.error('Frame error:', e); }
   segQueue = [];

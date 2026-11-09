@@ -1,6 +1,6 @@
 # Hand Games
 
-Fruit Ninja, tennis, a jigsaw puzzle and Tidy Up, played with your hands through the webcam (MediaPipe hand tracking).
+Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played with your hands through the webcam (MediaPipe hand tracking).
 
 **Play:** https://hubarahman2001-lab.github.io/Hand-gmaes/
 
@@ -8,6 +8,7 @@ Fruit Ninja, tennis, a jigsaw puzzle and Tidy Up, played with your hands through
 - **Tennis:** 2 players, or you against the computer.
 - **Puzzle:** 6, 12 or 24 pieces, with the kitten picture or your own photo (stays on your device). Make a fist over a piece to grab it, open your hand to drop it.
 - **Tidy Up:** remember the cozy room, then everything gets thrown around. Make a fist to pick things up and put them back where they belong. Easy, Normal or Hard, with a 👀 Peek button.
+- **Rock Paper Scissors:** you against the computer, read from your real hand shape. Make a fist to start a round, then show ✊ ✋ or ✌️ on "Shoot!". Best of 3, Best of 5, or Survival (3 lives). The computer picks before you throw; the **smart computer** learns your habits.
 - **Hand check:** see whether the camera picks up your open hand, fist and pinch, plus tracking speed and light.
 - **Settings:** slicing speed, fist and pinch sensitivity, steadiness and button hold time (saved on your device).
 - **Pause:** Fruit Ninja and tennis pause when your hand leaves the camera; ⏸ button for every game.
