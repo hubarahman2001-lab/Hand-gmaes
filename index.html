@@ -39,7 +39,8 @@
   <div id="msg"></div>
   <button id="go">Start camera</button>
   <button id="touch" class="ghost">Play with touch / mouse</button>
-  <p class="small">Works best on a laptop in Chrome or Edge. Stand back so your whole hand is in view, in a well-lit room.</p>
+  <p class="small">Works best on a laptop in Chrome or Edge. Stand back so your whole hand is in view.
+     A bright room helps a lot: light on your hand (not behind you) means less blur on fast swipes.</p>
 </div>
 
 <script>
@@ -53,9 +54,11 @@ const CDNS = [                               // where the hand-tracking model is
 ];
 const FINGERS = [4, 8, 16];                  // fingertips that are tracked: 4 = thumb, 8 = index, 16 = ring
 const FINGER_COLORS = ['#54a0ff', '#feca57', '#ff6b9d'];   // thumb, index, ring
-const GRACE = 0.3;                           // seconds a hand is kept after the tracker loses it (fast swipes blur the camera)
+const GRACE = 0.5;                           // seconds a lost hand is kept (and followed by its motion blur) before it's dropped
 const SMOOTH_MIN = 1.5;                      // jitter smoothing when your hand is still (lower = steadier but laggier)
 const SMOOTH_SPEED = 0.01;                   // how fast the smoothing switches off when your hand moves quickly
+const NINJA_HANDS = 1;                       // hands tracked in Fruit Ninja: 1 = faster, steadier tracking; 2 = both hands slice
+const MODEL_OPTIONS = { modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 };   // 0 = faster "lite" model
 const NINJA_BEST_KEY = 'handgames_ninja_best';
 const TENNIS_WIN = 5;                        // points needed to win tennis
 const FONT = 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
@@ -70,6 +73,7 @@ const msgEl = document.getElementById('msg');
 const startEl = document.getElementById('start');
 const goBtn = document.getElementById('go');
 let W = 0, H = 0;
+let handModel = null, maxHands = 1;
 
 // Older browsers (e.g. Safari 15) can't draw rounded rectangles, so add it
 if (!CanvasRenderingContext2D.prototype.roundRect) {
@@ -123,7 +127,7 @@ function textWrap(t, x, y, size, color, maxW, lineH, weight) {
 
 // ================= INPUT: hands (webcam) or touch / mouse =================
 // Each entry in `tips` is one hand (or one finger on a touch screen):
-//   { id, x, y, fingers: [{x, y}, ...], pts: all 21 hand points (webcam only) }
+//   { id, x, y, fingers: [{x, y}, ...], pts: all 21 hand points (webcam only), assisted }
 //   x, y = the middle of the tracked fingertips
 let mode = 'none';      // 'hand' = webcam hand tracking, 'touch' = finger or mouse
 let tips = [];
@@ -169,6 +173,38 @@ function toScreen(lm) {
   return { x: W - (lm.x * vw * sc + dx), y: lm.y * vh * sc + dy };
 }
 
+// Move a hand to new fingertip positions (from the tracker, or estimated by motion assist)
+function moveTrack(tr, raw, t) {
+  tr.raw = raw.map(r => ({ x: r.x, y: r.y }));
+  tr.fingers = raw.map((r, k) => {
+    const p = { x: smooth(tr.filters[k].x, r.x, t), y: smooth(tr.filters[k].y, r.y, t) };
+    addSample(tr.id + ':' + k, p.x, p.y, t);
+    return p;
+  });
+  const c = avgOf(tr.fingers);
+  if (tr.c && t - tr.c.t > 0.001) {                          // hand speed (pixels per second)
+    const dt = t - tr.c.t;
+    tr.vx = 0.5 * tr.vx + 0.5 * (c.x - tr.c.x) / dt;
+    tr.vy = 0.5 * tr.vy + 0.5 * (c.y - tr.c.y) / dt;
+  }
+  tr.c = { x: c.x, y: c.y, t: t };
+}
+
+function rebuildTips() {
+  tips = tracks.map(tr => ({ id: tr.id, x: tr.c.x, y: tr.c.y, fingers: tr.fingers, pts: tr.pts, assisted: tr.assisted }));
+}
+
+// Forget hands that have been missing for too long
+function pruneTracks(t) {
+  const n = tracks.length;
+  tracks = tracks.filter(tr => t - tr.seen < GRACE);
+  if (tracks.length === n) return;
+  const alive = {};
+  tracks.forEach(tr => FINGERS.forEach((_, k) => { alive[tr.id + ':' + k] = true; }));
+  Object.keys(trails).forEach(id => { if (id[0] === 'h' && !alive[id]) delete trails[id]; });
+  rebuildTips();
+}
+
 // Called by MediaPipe every time it has looked at a camera frame
 function onResults(res) {
   if (mode !== 'hand') return;
@@ -195,27 +231,97 @@ function onResults(res) {
       if (d < limit && d < bestD) { bestD = d; best = tr; }
     });
     if (!best) {
-      best = { id: 'h' + (nextId++), filters: FINGERS.map(() => ({ x: {}, y: {} })) };
+      best = { id: 'h' + (nextId++), filters: FINGERS.map(() => ({ x: {}, y: {} })), vx: 0, vy: 0 };
       tracks.push(best);
     }
     matched.push(best);
     best.palm = h.palm; best.pts = h.pts; best.seen = t;
-    best.fingers = FINGERS.map((fi, k) => {
-      const p = { x: smooth(best.filters[k].x, h.pts[fi].x, t), y: smooth(best.filters[k].y, h.pts[fi].y, t) };
-      addSample(best.id + ':' + k, p.x, p.y, t);
-      return p;
-    });
+    best.lost = false; best.assisted = false; best.ref = null;
+    moveTrack(best, FINGERS.map(fi => h.pts[fi]), t);
   });
+  tracks.forEach(tr => { if (matched.indexOf(tr) < 0) tr.lost = true; });
 
-  // Forget hands that have been missing for too long. Short gaps are bridged,
-  // so a swipe still cuts even if the camera blurred in the middle of it.
-  tracks = tracks.filter(tr => t - tr.seen < GRACE);
-  const alive = {};
-  tracks.forEach(tr => FINGERS.forEach((_, k) => { alive[tr.id + ':' + k] = true; }));
-  Object.keys(trails).forEach(id => { if (!alive[id]) delete trails[id]; });
-
-  tips = tracks.map(tr => { const c = avgOf(tr.fingers); return { id: tr.id, x: c.x, y: c.y, fingers: tr.fingers, pts: tr.pts }; });
+  // Hands missing for a short time are kept, so a swipe still cuts even if the camera blurred mid-swipe
+  pruneTracks(t);
+  rebuildTips();
   lastResultAt = performance.now();
+}
+
+// ================= MOTION ASSIST (Fruit Ninja) =================
+// Very fast swipes blur the camera picture and the hand tracker loses the hand.
+// While it's lost (up to GRACE seconds), follow the blur instead: compare each camera frame with
+// the one before, find the moving patch near where the hand was, and move the hand along with it.
+const MA = { cv: document.createElement('canvas'), key: '', w: 0, h: 0, prev: null, prevT: 0, mask: null, sx: null, sy: null };
+MA.ctx = MA.cv.getContext('2d', { willReadFrequently: true });
+
+function motionFrame(t) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || video.readyState < 2) return false;
+  const w = 80, h = Math.max(1, Math.round(80 * vh / vw));
+  const key = [w, h, W, H, vw, vh].join(',');
+  if (key !== MA.key) {                       // work out where each small pixel sits on the screen
+    MA.key = key; MA.w = w; MA.h = h; MA.cv.width = w; MA.cv.height = h; MA.prev = null;
+    MA.mask = new Uint8Array(w * h); MA.sx = new Float32Array(w * h); MA.sy = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const p = toScreen({ x: (x + 0.5) / w, y: (y + 0.5) / h });
+      MA.sx[y * w + x] = p.x; MA.sy[y * w + x] = p.y;
+    }
+  }
+  MA.ctx.drawImage(video, 0, 0, w, h);
+  const d = MA.ctx.getImageData(0, 0, w, h).data;
+  const gray = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < gray.length; i++, j += 4) gray[i] = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) >> 8;
+  let changed = 0;
+  const fresh = !!MA.prev && t - MA.prevT < 0.15;
+  if (fresh) for (let i = 0; i < gray.length; i++) { const m = Math.abs(gray[i] - MA.prev[i]) > 24 ? 1 : 0; MA.mask[i] = m; changed += m; }
+  MA.prev = gray; MA.prevT = t;
+  return fresh && changed > 0 && changed < gray.length * 0.4;   // ignore whole-picture changes (camera adjusting brightness)
+}
+
+function motionAssist(t) {
+  if (mode !== 'hand' || state !== 'ninja') { MA.prev = null; return; }
+  if (!motionFrame(t)) return;
+  const lost = tracks.filter(tr => tr.lost && t - tr.seen < GRACE);
+  if (!lost.length) return;
+  const R = Math.max(W, H) * 0.15, maxStep = Math.max(W, H) * 0.15;
+  lost.forEach(tr => {
+    const dt = clamp(t - tr.c.t, 0.001, 0.1);
+    const px = tr.c.x + tr.vx * dt, py = tr.c.y + tr.vy * dt;     // where the hand should be by now
+    const xs = [], ys = [];
+    for (let i = 0; i < MA.mask.length; i++) {
+      if (!MA.mask[i]) continue;
+      const dx = MA.sx[i] - px, dy = MA.sy[i] - py;
+      if (dx * dx + dy * dy < R * R) { xs.push(MA.sx[i]); ys.push(MA.sy[i]); }
+    }
+    if (xs.length < 6) { tr.ref = null; tr.vx *= 0.5; tr.vy *= 0.5; return; }   // nothing moving near the hand
+    let ex = 0, ey = 0;
+    xs.forEach((x, i) => { ex += x; ey += ys[i]; });
+    ex /= xs.length; ey /= xs.length;                         // middle of the moving patch
+    // Move the hand by how far the moving patch moved since the last frame. Using the change (not the
+    // patch's position) keeps the arm, which moves along with the hand, from pulling the blade off course.
+    // (on the first frame, keep it going at the speed it had when it was lost)
+    let mx = tr.ref ? ex - tr.ref.x : tr.vx * dt, my = tr.ref ? ey - tr.ref.y : tr.vy * dt;
+    const step = Math.hypot(mx, my);
+    if (step > maxStep) { mx *= maxStep / step; my *= maxStep / step; }
+    tr.ref = { x: ex, y: ey };
+    tr.palm = { x: tr.palm.x + mx, y: tr.palm.y + my };
+    tr.assisted = true;
+    moveTrack(tr, tr.raw.map(r => ({ x: r.x + mx, y: r.y + my })), t);
+  });
+  rebuildTips();
+}
+
+let motionLoopOn = false, rafMotion = false;
+function startMotionLoop() {
+  if (motionLoopOn) return;
+  motionLoopOn = true;
+  if (video.requestVideoFrameCallback) {                 // run once per new camera frame
+    const onFrame = () => {
+      try { motionAssist(secs()); } catch (e) { console.error('Motion assist error:', e); }
+      video.requestVideoFrameCallback(onFrame);
+    };
+    video.requestVideoFrameCallback(onFrame);
+  } else rafMotion = true;                               // older browsers: run every screen frame instead
 }
 
 // Touch / mouse: every finger on the screen (or the mouse while the button is held) is a pointer
@@ -263,7 +369,7 @@ function drawButtons(dt) {
   let fire = null;
   const armed = secs() - screenAt > 1;   // short pause so a hand already resting on a button doesn't press it
   buttons.forEach(b => {
-    const hover = mode === 'hand' && armed && tips.some(tp => tp.fingers.some(f => inRect(f, b)));
+    const hover = mode === 'hand' && armed && tips.some(tp => !tp.assisted && tp.fingers.some(f => inRect(f, b)));
     dwell[b.id] = hover ? (dwell[b.id] || 0) + dt : 0;
     ctx.fillStyle = hover ? 'rgba(108,92,231,.95)' : 'rgba(30,30,50,.85)';
     ctx.strokeStyle = '#a29bfe'; ctx.lineWidth = 3;
@@ -285,7 +391,7 @@ let screenAt = 0;      // when the current screen appeared
 let banner = null;     // short how-to-play line at the start of a game
 
 function setScreen(s) { state = s; screenAt = secs(); }
-function goMenu() { banner = null; setScreen('menu'); }
+function goMenu() { banner = null; setMaxHands(1); setScreen('menu'); }
 document.getElementById('menuBtn').onclick = goMenu;
 function showBanner(t) { banner = { text: t, life: 3.5 }; }
 
@@ -297,6 +403,7 @@ let N = null;
 function startNinja() {
   N = { fruits: [], halves: [], parts: [], pops: [], score: 0, lives: 3, spawnT: 0.8,
         best: +(load(NINJA_BEST_KEY) || 0), flash: 0, flashRGB: '255,80,80' };
+  setMaxHands(NINJA_HANDS);
   setScreen('ninja');
   showBanner(mode === 'hand' ? 'Swipe fast through the fruit. Your thumb, index and ring finger all slice. Avoid the 💣'
                              : 'Swipe through the fruit. Avoid the 💣');
@@ -443,6 +550,7 @@ function startTennis() {
   T = { p: [{ y: H / 2, score: 0, has: false, glow: 0 }, { y: H / 2, score: 0, has: false, glow: 0 }],
         ph: clamp(H * 0.22, 80, 200), pw: 16, ball: null, wait: 0, rally: 0, best: 0, trail: [] };
   serve(Math.random() < 0.5 ? 1 : -1);
+  setMaxHands(2);
   setScreen('tennis');
   showBanner(mode === 'hand' ? 'Player 1 on the left, Player 2 on the right. Move your hand up and down.'
                              : 'Player 1 drags on the left, Player 2 on the right.');
@@ -572,15 +680,17 @@ const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,
 function drawPointers() {
   if (state === 'ninja') drawTrails();
   tips.forEach(tp => {
-    if (tp.pts && state !== 'ninja') {        // faint outline of the hand
+    if (tp.pts && !tp.assisted && state !== 'ninja') {        // faint outline of the hand
       ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2;
       BONES.forEach(bn => { ctx.beginPath(); ctx.moveTo(tp.pts[bn[0]].x, tp.pts[bn[0]].y); ctx.lineTo(tp.pts[bn[1]].x, tp.pts[bn[1]].y); ctx.stroke(); });
     }
-    tp.fingers.forEach((f, k) => {            // one coloured dot per tracked fingertip
+    ctx.globalAlpha = tp.assisted ? 0.5 : 1;                  // faded while following a fast swipe's blur
+    tp.fingers.forEach((f, k) => {                            // one coloured dot per tracked fingertip
       ctx.fillStyle = tp.pts ? FINGER_COLORS[k] : '#feca57';
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5;
       ctx.beginPath(); ctx.arc(f.x, f.y, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     });
+    ctx.globalAlpha = 1;
   });
 }
 function drawTrails() {
@@ -604,13 +714,14 @@ function updateStatus() {
     if (trackingBroken) setStatus('⚠️ Hand tracking stopped. Reload the page');
     else if (performance.now() - lastResultAt > 2500) { tips = []; tracks = []; setStatus('⏳ Waiting for hand tracking…'); }
     else setStatus((tips.length ? '✋ ' + tips.length + (tips.length > 1 ? ' hands' : ' hand') : '👀 Show your hand') +
-                   (trackFps ? ' · ' + trackFps + ' fps' : ''));
+                   (tips.some(tp => tp.assisted) ? ' ⚡' : '') + (trackFps ? ' · ' + trackFps + ' fps' : ''));
   } else if (mode === 'touch') setStatus('👆 Touch / mouse mode');
 }
 
 // ================= MAIN LOOP =================
 let lastFrame = performance.now(), frameErrors = 0;
 function frame(dt) {
+  if (mode === 'hand') { if (rafMotion) motionAssist(secs()); pruneTracks(secs()); }
   ctx.clearRect(0, 0, W, H);
   if (mode === 'hand') { ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H); }   // dim the camera a bit
   else {
@@ -641,7 +752,7 @@ function loop() {
 }
 
 // ================= STARTING THE CAMERA AND HAND TRACKING =================
-let handModel = null, pumping = false, sendErrors = 0;
+let pumping = false, sendErrors = 0;
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -663,11 +774,18 @@ async function loadHandModel() {
   }
   if (!base || typeof Hands === 'undefined') throw new Error('Hand tracking script could not be downloaded');
   const h = new Hands({ locateFile: f => base + f });
-  // modelComplexity 0 = the faster "lite" model: more camera frames per second, which matters most for fast swipes
-  h.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+  h.setOptions(Object.assign({ maxNumHands: maxHands }, MODEL_OPTIONS));
   h.onResults(onResults);
   await withTimeout(h.initialize(), 60000, 'Loading the hand model');
   return h;
+}
+
+// Tracking fewer hands is faster: with room for 2 hands, the tracker keeps searching the whole picture
+// for a second hand on every frame. So Fruit Ninja and the menus use 1, tennis uses 2.
+function setMaxHands(n) {
+  if (!handModel || n === maxHands) return;
+  maxHands = n;
+  try { handModel.setOptions(Object.assign({ maxNumHands: n }, MODEL_OPTIONS)); } catch (e) { console.warn(e); }
 }
 
 function waitForVideo(ms) {
@@ -713,7 +831,9 @@ async function startCamera() {
         e.name = window.isSecureContext === false ? 'InsecureContext' : 'NoCameraApi';
         throw e;
       }
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 } }, audio: false });
+      // Lower resolution + higher frame rate = less movement (and blur) between frames, and faster tracking
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
+        facingMode: 'user', width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } } });
       video.srcObject = stream;
       try { await video.play(); } catch (e) {}
       await waitForVideo(8000);
@@ -740,6 +860,7 @@ async function startCamera() {
   lastResultAt = performance.now();
   startEl.style.display = 'none';
   goMenu();
+  startMotionLoop();
   if (!pumping) { pumping = true; pump(); }
 }
 
