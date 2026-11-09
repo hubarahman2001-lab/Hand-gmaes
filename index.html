@@ -154,6 +154,11 @@ function text(t, x, y, size, color, align, weight) {
   ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(t, x, y);
 }
+function fitText(t, x, y, size, color, maxW, weight) {     // like text(), but smaller if it wouldn't fit across maxW
+  ctx.font = (weight || 700) + ' ' + Math.round(size) + 'px ' + FONT;
+  const w = ctx.measureText(t).width;
+  text(t, x, y, w > maxW ? size * maxW / w : size, color, 'center', weight);
+}
 function textWrap(t, x, y, size, color, maxW, lineH, weight) {
   ctx.font = (weight || 500) + ' ' + Math.round(size) + 'px ' + FONT;
   const lines = []; let line = '';
@@ -507,6 +512,7 @@ function startMotionLoop() {
 
 // Touch / mouse: every finger on the screen (or the mouse while the button is held) is a pointer
 const pointers = new Map();
+let tapBtn = null;      // a finger (or the mouse) that went down on a button: it's pressed when the finger lifts on that same button
 function syncPointerTips() {
   tips = [];
   pointers.forEach((p, pid) => tips.push({ id: 'p' + pid, x: p.x, y: p.y, fingers: [p], palm: p, grab: true, down: p.down }));
@@ -514,7 +520,11 @@ function syncPointerTips() {
 cv.addEventListener('pointerdown', e => {
   audioInit();
   const p = { x: e.clientX, y: e.clientY };
-  if (pressButtonAt(p)) return;                       // on-screen buttons work in every mode
+  const b = buttonAt(p);
+  if (b) {                                             // on-screen buttons work in every mode
+    if (!(state === 'over' && secs() - screenAt < 0.6)) tapBtn = { id: b.id, pid: e.pointerId, scr: screenAt };   // (not right after game over)
+    return;
+  }
   if (mode !== 'touch') return;
   try { cv.setPointerCapture(e.pointerId); } catch (err) {}
   p.down = { x: p.x, y: p.y };                         // where the finger first touched (used to pick up puzzle pieces)
@@ -530,6 +540,11 @@ cv.addEventListener('pointermove', e => {
   syncPointerTips();
 });
 function endPointer(e) {
+  if (tapBtn && tapBtn.pid === e.pointerId) {          // lifted: press the button only if the finger is still on it
+    const b = e.type === 'pointerup' ? buttonAt({ x: e.clientX, y: e.clientY }) : null;
+    if (b && b.id === tapBtn.id && tapBtn.scr === screenAt && !b.needsClick) pressButton(b, false);
+    tapBtn = null;
+  }
   pointers.delete(e.pointerId);
   delete trails['p' + e.pointerId];
   syncPointerTips();
@@ -538,23 +553,22 @@ cv.addEventListener('pointerup', endPointer);
 cv.addEventListener('pointercancel', endPointer);
 
 // ================= ON-SCREEN BUTTONS =================
-// Press with: a pinch, holding a fingertip on it for 1 second, or a tap / click.
+// Webcam: your index fingertip is the pointer (the ring drawn on it). Press by pinching 🤏, or by holding it still on a
+// button for 1 second. Only the button under the pointer fills up, so your other fingers can't press anything by accident.
+// (In Puzzle and Tidy Up the ✋ in the middle of your hand is the pointer.)  Touch / mouse: tap or click.
 let buttons = [];
 const dwell = {};
-function inRect(p, b) { return p.x > b.x && p.x < b.x + b.w && p.y > b.y && p.y < b.y + b.h; }
-function addButton(id, label, x, y, w, h, act, needsClick) { buttons.push({ id: id, label: label, x: x, y: y, w: w, h: h, act: act, needsClick: !!needsClick }); }
+function inRect(p, b, pad) { pad = pad || 0; return p.x > b.x - pad && p.x < b.x + b.w + pad && p.y > b.y - pad && p.y < b.y + b.h + pad; }
+function addButton(id, label, x, y, w, h, act, needsClick, icon) {
+  buttons.push({ id: id, label: label, x: x, y: y, w: w, h: h, act: act, needsClick: !!needsClick, icon: icon || '' });
+}
+function buttonAt(p) { return buttons.find(b => inRect(p, b)); }
+function handPointer(tr) { return state === 'puzzle' || state === 'tidy' ? tr.palmS : tr.fingers && tr.fingers[1]; }
 function pressButton(b, byHand) {
   // Some buttons (like picking a photo) open a file picker, which browsers only allow from a real tap or click
   if (b.needsClick) { if (byHand) showToast('Use your mouse or finger for this one'); return; }
   sfx('click');
   b.act();
-}
-function pressButtonAt(p) {
-  if (state === 'over' && secs() - screenAt < 0.6) return false;   // avoid accidental taps right after game over
-  const b = buttons.find(b => inRect(p, b));
-  if (!b) return false;
-  if (!b.needsClick) pressButton(b, false);           // (needsClick buttons are handled by the click event below)
-  return true;
 }
 cv.addEventListener('click', e => {
   const p = { x: e.clientX, y: e.clientY };
@@ -563,31 +577,68 @@ cv.addEventListener('click', e => {
 });
 function drawButtons(dt) {
   let fire = null;
-  const hold = setting('hold');
-  const armed = secs() - screenAt > 1;   // short pause so a hand already resting on a button doesn't press it
-  if (mode === 'hand') tracks.forEach(tr => {        // a pinch that just started presses the button under it
-    if (!tr.pinchEvt) return;
-    tr.pinchEvt = false;
-    if (secs() - screenAt < 0.15 || !tr.pinchPt) return;
-    const b = buttons.find(b => inRect(tr.pinchPt, b));
-    if (b && !fire) fire = b;
+  const t = secs(), hold = setting('hold');
+  const armed = t - screenAt > 0.4;                    // short pause after a new screen appears
+  const under = {}, filling = {};                      // buttons with a hand's pointer on them / that are filling up
+  if (mode === 'hand') tracks.forEach(tr => {
+    const c = !tr.lost && handPointer(tr);
+    let b = null;
+    if (c) {    // the button under the pointer. It's kept while the pointer wobbles just past its edge, so it can't flip to the next one
+      const cur = tr.hoverId && buttons.find(x => x.id === tr.hoverId);
+      b = (cur && inRect(c, cur, 10) ? cur : buttonAt(c)) || null;
+    }
+    tr.hoverId = b ? b.id : null;
+    // A button that was already under your pointer when the screen appeared (e.g. "Back" right where the game you just
+    // picked was) doesn't fill up until the pointer has moved off it, so holding still can't press one thing after another
+    if (tr.blockScr === undefined) tr.blockScr = screenAt;                     // (a hand that has just appeared isn't held back)
+    else if (tr.blockScr !== screenAt) { tr.blockScr = screenAt; tr.blocked = tr.hoverId; }
+    if (tr.blocked && tr.hoverId !== tr.blocked) tr.blocked = null;
+    if (b) { under[b.id] = true; if (b.id !== tr.blocked) filling[b.id] = true; }
+    tr.hoverLog = (tr.hoverLog || []).filter(h => t - h.t < 0.5);       // what the pointer was on, for the last half second
+    tr.hoverLog.push({ t: t, id: tr.hoverId, scr: screenAt });
+    if (tr.pinchEvt) {             // a pinch presses the button the pointer was resting on just before
+      tr.pinchEvt = false;         // (closing thumb and finger moves the fingertip, maybe onto the next button)
+      if (t - screenAt < 0.15) return;
+      const n = {};
+      tr.hoverLog.forEach(h => { if (h.id && h.scr === screenAt) n[h.id] = (n[h.id] || 0) + 1; });
+      const id = Object.keys(n).sort((a, z) => n[z] - n[a])[0];
+      const pb = id && buttons.find(x => x.id === id);
+      if (pb && !fire) fire = pb;
+    }
   });
   buttons.forEach(b => {
-    const hover = mode === 'hand' && armed && tips.some(tp => !tp.assisted &&
-      (tp.fingers.some(f => inRect(f, b)) || (tp.pinchPt && inRect(tp.pinchPt, b))));
-    dwell[b.id] = hover ? (dwell[b.id] || 0) + dt : 0;
-    ctx.fillStyle = hover ? 'rgba(108,92,231,.95)' : 'rgba(30,30,50,.85)';
-    ctx.strokeStyle = '#a29bfe'; ctx.lineWidth = 3;
+    const hot = !!under[b.id] || (tapBtn && tapBtn.id === b.id && tapBtn.scr === screenAt);
+    dwell[b.id] = filling[b.id] && armed ? (dwell[b.id] || 0) + dt : Math.max(0, (dwell[b.id] || 0) - dt * 3);
+    ctx.fillStyle = hot ? 'rgba(108,92,231,.95)' : 'rgba(30,30,50,.85)';
+    ctx.strokeStyle = hot ? '#fff' : '#a29bfe'; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 16); ctx.fill(); ctx.stroke();
     if (dwell[b.id] > 0) {
       ctx.fillStyle = 'rgba(29,209,161,.6)';
       ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w * Math.min(1, dwell[b.id] / hold), b.h, 16); ctx.fill();
     }
-    let fs = b.h * 0.36;                              // shrink the label if it doesn't fit
-    ctx.font = '600 ' + Math.round(fs) + 'px ' + FONT;
-    const tw = ctx.measureText(b.label).width;
-    if (tw > b.w * 0.88) fs *= b.w * 0.88 / tw;
-    text(b.label, b.x + b.w / 2, b.y + b.h / 2, fs, '#fff', 'center', 600);
+    if (b.icon && b.w > b.h * 2.5) {                   // wide tile: picture beside the name
+      const fs = Math.min(21, b.h * 0.3), is = Math.min(b.h * 0.5, 44);
+      ctx.font = '700 ' + Math.round(fs) + 'px ' + FONT;
+      const tw = Math.min(ctx.measureText(b.label).width, b.w - is - 40), gx = b.x + (b.w - (is + 12 + tw)) / 2;
+      ctx.font = Math.round(is) + 'px ' + EMOJI_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+      ctx.fillText(b.icon, gx + is / 2, b.y + b.h / 2);
+      ctx.save(); ctx.translate(gx + is + 12 + tw / 2, b.y + b.h / 2); fitText(b.label, 0, 0, fs, '#fff', tw + 1, 700); ctx.restore();
+    } else if (b.icon) {                               // big tile: picture on top, name underneath
+      ctx.font = Math.round(Math.min(b.h * 0.4, b.w * 0.3)) + 'px ' + EMOJI_FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+      ctx.fillText(b.icon, b.x + b.w / 2, b.y + b.h * 0.38);
+      let fs = Math.min(19, b.h * 0.19);
+      ctx.font = '700 ' + Math.round(fs) + 'px ' + FONT;
+      const tw = ctx.measureText(b.label).width;
+      if (tw > b.w * 0.9) fs *= b.w * 0.9 / tw;
+      text(b.label, b.x + b.w / 2, b.y + b.h * 0.79, fs, '#fff', 'center', 700);
+    } else {
+      let fs = b.h * 0.36;                             // shrink the label if it doesn't fit
+      ctx.font = '600 ' + Math.round(fs) + 'px ' + FONT;
+      const tw = ctx.measureText(b.label).width;
+      if (tw > b.w * 0.88) fs *= b.w * 0.88 / tw;
+      text(b.label, b.x + b.w / 2, b.y + b.h / 2, fs, '#fff', 'center', 600);
+    }
     if (dwell[b.id] >= hold) { dwell[b.id] = 0; if (!fire) fire = b; }
   });
   if (fire && !nameOpen) pressButton(fire, true);
@@ -601,7 +652,7 @@ let banner = null;     // short how-to-play line at the start of a game
 let toast = null;      // short message at the bottom of the screen
 let opt = null;        // the options screen being shown
 
-function setScreen(s) { state = s; screenAt = secs(); toast = null; paused = null; lastHandAt = secs(); }
+function setScreen(s) { state = s; screenAt = secs(); toast = null; paused = null; lastHandAt = secs(); for (const k in dwell) delete dwell[k]; }
 function goMenu() { banner = null; setMaxHands(1); setScreen('menu'); }
 document.getElementById('menuBtn').onclick = () => { audioInit(); goMenu(); };
 function showBanner(t) { banner = { text: t, life: 3.5 }; }
@@ -710,52 +761,60 @@ nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') closeName(tr
 let hsIdx = 0;
 function openScores() { setScreen('scores'); }
 function scoresDraw() {
-  const big = Math.min(44, W * 0.08);
-  let y = Math.max(70, H * 0.1);
+  const short = H < 520;
+  const big = short ? Math.min(32, W * 0.06) : Math.min(44, W * 0.08);
+  let y = short ? Math.max(44, H * 0.11) : Math.max(70, H * 0.1);
   text('🏆 High scores', W / 2, y, big, '#fff', 'center', 800);
-  y += big + 10;
+  y += short ? big * 0.75 : big + 10;
   const k = BOARD_ORDER[hsIdx], B = BOARDS[k], list = boardGet(k);
-  const cw = Math.min(W * 0.92, 520), x = (W - cw) / 2, bs = 50;
+  const cw = Math.min(W * 0.92, 520), x = (W - cw) / 2, bs = short ? 44 : 50;
   addButton('hs_prev', '◀', x, y, bs, bs, () => { hsIdx = (hsIdx + BOARD_ORDER.length - 1) % BOARD_ORDER.length; });
   addButton('hs_next', '▶', x + cw - bs, y, bs, bs, () => { hsIdx = (hsIdx + 1) % BOARD_ORDER.length; });
   text(B.title, W / 2, y + bs / 2, Math.min(20, W * 0.045), '#feca57', 'center', 700);
-  text((hsIdx + 1) + ' / ' + BOARD_ORDER.length, W / 2, y + bs + 14, 13, 'rgba(255,255,255,.6)', 'center', 600);
-  y += bs + 34;
-  const rh = 46;
+  text((hsIdx + 1) + ' / ' + BOARD_ORDER.length, W / 2, y + bs + 12, 13, 'rgba(255,255,255,.6)', 'center', 600);
+  y += bs + (short ? 26 : 34);
+  const backH = short ? 44 : 52, gap = short ? 5 : 8;
+  const rh = clamp((H - y - backH - 24) / 5 - gap, 26, 46);          // the 5 rows share the space that's left
   if (!list.length) text('No scores yet. Be the first!', W / 2, y + 40, 18, 'rgba(255,255,255,.8)', 'center', 600);
   list.forEach((e, i) => {
-    const ry = y + i * (rh + 8);
+    const ry = y + i * (rh + gap);
     ctx.fillStyle = i === 0 ? 'rgba(254,202,87,.2)' : 'rgba(255,255,255,.08)';
     ctx.beginPath(); ctx.roundRect(x, ry, cw, rh, 12); ctx.fill();
-    text(['🥇', '🥈', '🥉', '4', '5'][i], x + 28, ry + rh / 2, 20, '#fff', 'center', 700);
-    text(e.n, x + 58, ry + rh / 2, 18, '#fff', 'left', 600);
-    text(B.fmt(e.v), x + cw - 16, ry + rh / 2, 18, '#fff', 'right', 700);
+    const fs = Math.min(18, rh * 0.5);
+    text(['🥇', '🥈', '🥉', '4', '5'][i], x + 28, ry + rh / 2, fs + 2, '#fff', 'center', 700);
+    text(e.n, x + 58, ry + rh / 2, fs, '#fff', 'left', 600);
+    text(B.fmt(e.v), x + cw - 16, ry + rh / 2, fs, '#fff', 'right', 700);
   });
-  addButton('hs_back', '← Back', W / 2 - 100, y + 5 * (rh + 8) + 12, 200, 52, goMenu);
+  addButton('hs_back', '← Back', W / 2 - 100, y + 5 * (rh + gap) + (short ? 6 : 12), 200, backH, goMenu);
 }
 
 // ================= SETTINGS SCREEN =================
 let settingsBack = null;
 function openSettings(back) { settingsBack = back || goMenu; setScreen('settings'); }
 function settingsDraw() {
-  const big = Math.min(44, W * 0.08);
-  let y = Math.max(70, H * 0.1);
+  const short = H < 520 && W >= 560;                  // phone on its side: settings in two columns
+  const big = short ? Math.min(34, W * 0.06) : Math.min(44, W * 0.08);
+  let y = short ? Math.max(46, H * 0.12) : Math.max(70, H * 0.1);
   text('⚙️ Settings', W / 2, y, big, '#fff', 'center', 800);
-  y += big - 6;
-  const narrow = W < 640, colW = Math.min(W * 0.92, 660), x0 = (W - colW) / 2, rowH = narrow ? 84 : 64, bs = 46;
-  SETTING_DEFS.forEach(d => {
-    const i = settings[d.key], n = d.values.length;
-    const cy = narrow ? y + 54 : y + rowH / 2;
-    text(d.label, x0, narrow ? y + 16 : cy, narrow ? 15 : 16, '#fff', 'left', 600);
+  y += short ? big * 0.6 : big - 6;
+  const cols = short ? 2 : 1, colGap = 28;
+  const totalW = short ? Math.min(W * 0.94, 900) : Math.min(W * 0.92, 660), colW = (totalW - colGap * (cols - 1)) / cols;
+  const narrow = short || W < 640, rowH = short ? 70 : narrow ? 86 : 64, bs = short ? 44 : narrow ? 52 : 46;
+  const perCol = Math.ceil(SETTING_DEFS.length / cols), top = y;
+  SETTING_DEFS.forEach((d, j) => {
+    const i = settings[d.key], n = d.values.length, col = Math.floor(j / perCol);
+    const x0 = (W - totalW) / 2 + col * (colW + colGap), ry = top + (j % perCol) * rowH;
+    const cy = narrow ? ry + (short ? 46 : 54) : ry + rowH / 2;
+    text(d.label, x0, narrow ? ry + (short ? 14 : 16) : cy, narrow ? 15 : 16, '#fff', 'left', 600);
     const ctlW = narrow ? colW : colW * 0.48, cx0 = x0 + colW - ctlW;
     addButton('s_' + d.key + '_m', '−', cx0, cy - bs / 2, bs, bs, () => { settings[d.key] = Math.max(0, i - 1); saveSettings(); });
     addButton('s_' + d.key + '_p', '+', cx0 + ctlW - bs, cy - bs / 2, bs, bs, () => { settings[d.key] = Math.min(n - 1, i + 1); saveSettings(); });
     text('●'.repeat(i + 1) + '○'.repeat(n - 1 - i) + '  ' + d.names[i], cx0 + ctlW / 2, cy, 16, '#feca57', 'center', 700);
-    y += rowH;
   });
-  if (mode === 'hand') textWrap('Tip: 🖐 Hand check shows the fist and pinch meters, so you can see what each setting does.',
-                                W / 2, y + 12, 14, 'rgba(255,255,255,.75)', colW, 19);
-  const bw = Math.min(200, colW * 0.45), bh = 52, by = y + 44;
+  y = top + perCol * rowH;
+  if (mode === 'hand' && !short) textWrap('Tip: 🖐 Hand check shows the fist and pinch meters, so you can see what each setting does.',
+                                          W / 2, y + 12, 14, 'rgba(255,255,255,.75)', totalW, 19);
+  const bw = Math.min(200, totalW * 0.45), bh = short ? 46 : 52, by = y + (short ? 12 : 44);
   addButton('s_reset', 'Reset', W / 2 - bw - 8, by, bw, bh, () => {
     const keep = { ninjaHands: settings.ninjaHands, tidyOutlines: settings.tidyOutlines, rpsSmart: settings.rpsSmart };
     settings = Object.assign(defaultSettings(), keep); saveSettings(); showToast('Back to the normal settings');
@@ -788,10 +847,11 @@ function meter(label, f, mark, y) {
   ctx.fillStyle = '#feca57'; ctx.fillRect(x + w * mark - 2, y - 5, 4, 24);
 }
 function checkDraw() {
-  const big = Math.min(44, W * 0.08);
-  let y = Math.max(70, H * 0.1);
+  const short = H < 520;                       // phone on its side: everything a bit smaller and closer together
+  const big = short ? Math.min(30, W * 0.06) : Math.min(44, W * 0.08);
+  let y = short ? Math.max(44, H * 0.11) : Math.max(70, H * 0.1);
   text('🖐 Hand check', W / 2, y, big, '#fff', 'center', 800);
-  y += big - 4;
+  y += short ? big * 0.75 : big - 4;
   if (mode !== 'hand') {
     textWrap('Hand check needs the camera. Reload the page and press Start camera.', W / 2, y + 30, 17, '#fff', W * 0.86, 24, 600);
     addButton('c_back', '← Back', W / 2 - 100, y + 90, 200, 52, goMenu);
@@ -804,11 +864,11 @@ function checkDraw() {
   [tp ? '✅ Hand found' : '❌ No hand yet: hold your hand up in front of the camera',
    'Tracking speed: ' + (trackFps ? trackFps + ' fps, ' + (trackFps >= 24 ? 'great' : trackFps >= 15 ? 'OK' : 'slow. Close other tabs and apps, or plug your laptop in') : 'measuring…'),
    'Light: ' + (lv < 0 ? 'measuring…' : lv < 55 ? 'too dark. Turn on a light or face a window' : lv < 85 ? 'a bit dark' : 'good')
-  ].forEach(l => { y += textWrap(l, W / 2, y + 14, 16, '#fff', W * 0.9, 20, 600) * 22 + 4; });
-  y += 16;
+  ].forEach(l => { y += short ? textWrap(l, W / 2, y + 12, 15, '#fff', W * 0.9, 18, 600) * 19 + 2 : textWrap(l, W / 2, y + 14, 16, '#fff', W * 0.9, 20, 600) * 22 + 4; });
+  y += short ? 8 : 16;
   // the three hand shapes: light up when the camera sees them, ticked once you've done each one
   const tiles = [['open', '✋', 'Open hand'], ['fist', '✊', 'Fist'], ['pinch', '🤏', 'Pinch']];
-  const ts = Math.min(120, (W * 0.9 - 24) / 3), tx0 = (W - (3 * ts + 24)) / 2;
+  const ts = Math.min(120, (W * 0.9 - 24) / 3, short ? H * 0.2 : 999), tx0 = (W - (3 * ts + 24)) / 2;
   tiles.forEach((tl, i) => {
     const x = tx0 + i * (ts + 12), on = g === tl[0];
     ctx.fillStyle = on ? 'rgba(29,209,161,.35)' : 'rgba(30,30,50,.8)';
@@ -818,16 +878,16 @@ function checkDraw() {
     ctx.fillText(tl[1], x + ts / 2, y + ts * 0.4);
     text(tl[2] + (seenG[tl[0]] ? ' ✓' : ''), x + ts / 2, y + ts * 0.8, Math.min(15, ts * 0.13), seenG[tl[0]] ? '#1dd1a1' : '#fff', 'center', 700);
   });
-  y += ts + 40;
+  y += ts + (short ? 28 : 40);
   if (tp) {
     const th = setting('fist'), pe = setting('pinch');
     const fistF = v => clamp((2.2 - v) / 1.5, 0, 1);     // fingers more bent = fuller bar
     const pinchF = v => clamp(1 - v / 0.8, 0, 1);       // thumb and finger closer = fuller bar
     meter('Fist meter: fill past the yellow line to grab', fistF(tp.curl || 2.2), fistF(th[0]), y);
-    meter('Pinch meter: fill past the yellow line to press', pinchF(tp.pinchR === undefined ? 1 : tp.pinchR), pinchF(pe), y + 52);
-    y += 86;
+    meter('Pinch meter: fill past the yellow line to press', pinchF(tp.pinchR === undefined ? 1 : tp.pinchR), pinchF(pe), y + (short ? 40 : 52));
+    y += short ? 68 : 86;
   } else y += 20;
-  const bw = Math.min(200, W * 0.42), bh = 52;
+  const bw = Math.min(200, W * 0.42), bh = short ? 44 : 52;
   addButton('c_set', '⚙️ Settings', W / 2 - bw - 8, y, bw, bh, () => openSettings(openHandCheck));
   addButton('c_done', 'Done ✓', W / 2 + 8, y, bw, bh, goMenu);
 }
@@ -902,27 +962,32 @@ photoInput.addEventListener('change', () => {
 });
 
 function optionsDraw() {
-  const big = Math.min(48, W * 0.09);
-  let y = Math.max(70, H * 0.11);
-  text(opt.title, W / 2, y, big, '#fff', 'center', 800);
+  const short = H < 520 && W >= 560;                  // phone on its side: two columns of buttons, no picture
+  const big = short ? Math.min(36, W * 0.06) : Math.min(48, W * 0.09);
+  let y = short ? Math.max(48, H * 0.12) : Math.max(70, H * 0.11);
+  fitText(opt.title, W / 2, y, big, '#fff', W * 0.92, 800);
   y += big * 0.7;
-  if (opt.preview && picW()) {                // small preview of the puzzle picture
+  if (opt.preview && picW() && !short) {      // small preview of the puzzle picture
     let w = Math.min(W * 0.6, 280), h = w * picH() / picW();
     if (h > H * 0.2) { h = H * 0.2; w = h * picW() / picH(); }
     ctx.drawImage(puzzlePic, W / 2 - w / 2, y, w, h);
     ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 2; ctx.strokeRect(W / 2 - w / 2, y, w, h);
     y += h + 18;
-  } else y += 14;
-  const bw = Math.min(W * 0.84, 420), bh = clamp(H * 0.085, 48, 64), gap = 12, x = (W - bw) / 2;
+  } else y += short ? 10 : 14;
+  const phoneHand = mode === 'hand' && W < 720;           // pointing with a hand on a small screen: bigger gaps
+  const cols = short ? 2 : 1, gap = phoneHand || short ? 16 : 12;
+  const bw = short ? Math.min(W * 0.9, 760) : Math.min(W * 0.88, 420), x = (W - bw) / 2, cw = (bw - gap * (cols - 1)) / cols;
+  const bh = short ? clamp(H * 0.12, 44, 56) : clamp(H * 0.085, phoneHand ? 54 : 48, 64);
   opt.items.forEach((it, i) => {
     const row = Array.isArray(it) ? it : [it];          // several buttons side by side
-    const w = (bw - gap * (row.length - 1)) / row.length;
-    row.forEach((r, k) => addButton(opt.id + i + '_' + k, r.label, x + k * (w + gap), y, w, bh, r.act, r.needsClick));
-    y += bh + gap;
+    const cx = x + (i % cols) * (cw + gap), w = (cw - gap * (row.length - 1)) / row.length;
+    row.forEach((r, k) => addButton(opt.id + i + '_' + k, r.label, cx + k * (w + gap), y, w, bh, r.act, r.needsClick));
+    if (i % cols === cols - 1 || i === opt.items.length - 1) y += bh + gap;
   });
-  addButton(opt.id + 'back', '← Back', x + bw * 0.25, y + 4, bw * 0.5, bh * 0.85, goMenu);
-  y += bh * 0.85 + 34;
-  if (opt.note) textWrap(opt.note, W / 2, y, 15, 'rgba(255,255,255,.75)', Math.min(W * 0.9, 520), 20);
+  const backW = short ? cw * 0.6 : bw * 0.5;
+  addButton(opt.id + 'back', '← Back', W / 2 - backW / 2, y + 4, backW, bh * 0.85, goMenu);
+  y += bh * 0.85 + (short ? 28 : 34);
+  if (opt.note && y < H - 30) textWrap(opt.note, W / 2, y, short ? 14 : 15, 'rgba(255,255,255,.75)', Math.min(W * 0.9, short ? 720 : 520), short ? 18 : 20);
 }
 
 // ================= FRUIT NINJA =================
@@ -1875,19 +1940,20 @@ function rpsDraw() {
   if (state === 'over') return;
   if (R.flash > 0) { ctx.fillStyle = 'rgba(' + R.flashRGB + ',' + (R.flash * 0.3) + ')'; ctx.fillRect(0, 0, W, H); }
   const hand = mode === 'hand', since = R.clock - R.phaseAt, res = R.phase === 'reveal' ? R.result : null;
+  const short = H < 520;                       // phone on its side: smaller score, hands a bit lower
   // scores
   if (R.kind === 'survival') {
     text('Wins ' + R.wins, 16, 70, 32, '#fff', 'left');
     text('❤️'.repeat(Math.max(0, R.lives)) + '🖤'.repeat(Math.max(0, 3 - R.lives)), W - 16, 70, 26, '#fff', 'right');
     if (R.streak >= 2) text('🔥 ' + R.streak + ' in a row', W / 2, 70, 20, '#feca57', 'center', 700);
   } else {
-    const sz = Math.min(64, W * 0.1);
-    text(String(R.you), W * 0.25, 85, sz, '#54a0ff');
-    text(String(R.cpu), W * 0.75, 85, sz, '#ff9f43');
-    text('First to ' + R.need, W / 2, 85, 16, 'rgba(255,255,255,.75)', 'center', 600);
+    const sz = short ? Math.min(42, H * 0.11) : Math.min(64, W * 0.1), sy = short ? 62 : 85;
+    text(String(R.you), W * 0.25, sy, sz, '#54a0ff');
+    text(String(R.cpu), W * 0.75, sy, sz, '#ff9f43');
+    text('First to ' + R.need, W / 2, sy, 16, 'rgba(255,255,255,.75)', 'center', 600);
   }
   // the two hands: you on the left, the computer on the right
-  const r = clamp(Math.min(W, H) * 0.11, 38, 100), y = H * 0.4, xl = W * 0.25, xr = W * 0.75;
+  const r = clamp(Math.min(W, H) * 0.11, 34, 100), y = H * (short ? 0.46 : 0.4), xl = W * 0.25, xr = W * 0.75;
   const beat = hand ? RPS_BEAT : RPS_BEAT_TOUCH;
   const bob = R.phase === 'count' && since < 3 * beat ? Math.sin(Math.PI * ((since / beat) % 1)) * r * 0.45 : 0;   // fists pump on each beat
   const pop = 1 + R.pop * 0.35;
@@ -1907,17 +1973,17 @@ function rpsDraw() {
   text('VS', W / 2, y, Math.min(30, W * 0.06), 'rgba(255,255,255,.6)', 'center', 800);
 
   // message under the hands
-  const big = Math.min(56, W * 0.1), my = y + r * 1.3 + 62, sub = my + big * 0.75 + 4;
+  const big = short ? Math.min(40, H * 0.1) : Math.min(56, W * 0.1), my = y + r * 1.3 + (short ? 44 : 62), sub = my + big * 0.75 + 4;
   if (R.phase === 'ready') {
     if (!hand) {
-      text('Pick your throw', W / 2, my, big * 0.8, '#fff', 'center', 800);
+      fitText('Pick your throw', W / 2, my, big * 0.8, '#fff', W * 0.92, 800);
       const bw = Math.min(W * 0.92, 540), gap = 12, w = (bw - 2 * gap) / 3, bh = clamp(H * 0.12, 60, 90), by = Math.max(sub + 10, H - bh - 30);
       RPS_KEYS.forEach((k, i) => addButton('rps_' + k, RPS_EMOJI[k] + ' ' + k[0].toUpperCase() + k.slice(1), (W - bw) / 2 + i * (w + gap), by, w, bh, () => rpsCount(k)));
     } else if (!tracks.some(x => !x.lost)) {
-      text('Show your hand to the camera', W / 2, my, big * 0.7, '#fff', 'center', 800);
+      fitText('Show your hand to the camera', W / 2, my, big * 0.7, '#fff', W * 0.92, 800);
       textWrap('Whole hand in view, palm towards the camera', W / 2, sub, 17, 'rgba(255,255,255,.85)', W * 0.9, 22, 600);
     } else {
-      text(R.round === 1 ? 'Make a fist ✊ to start' : 'Fist ✊ for round ' + R.round, W / 2, my, big * 0.7, '#fff', 'center', 800);
+      fitText(R.round === 1 ? 'Make a fist ✊ to start' : 'Fist ✊ for round ' + R.round, W / 2, my, big * 0.7, '#fff', W * 0.92, 800);
       const bw = Math.min(W * 0.5, 240);       // fills up while you hold the fist
       ctx.fillStyle = 'rgba(255,255,255,.2)'; ctx.beginPath(); ctx.roundRect(W / 2 - bw / 2, sub - 6, bw, 12, 6); ctx.fill();
       if (R.fistT > 0) { ctx.fillStyle = '#1dd1a1'; ctx.beginPath(); ctx.roundRect(W / 2 - bw / 2, sub - 6, Math.max(12, bw * Math.min(1, R.fistT / RPS_FIST)), 12, 6); ctx.fill(); }
@@ -1929,43 +1995,48 @@ function rpsDraw() {
     text(RPS_WORDS[n], 0, 0, big, n === 3 ? '#feca57' : '#fff', 'center', 900);
     ctx.restore();
   } else if (res) {
-    text(res.o === 1 ? 'You win!' : res.o === -1 ? 'Computer wins' : 'Tie!', W / 2, my, big, res.o === 1 ? '#1dd1a1' : res.o === -1 ? '#ff6b6b' : '#feca57', 'center', 900);
-    text(res.line + (res.o === 0 && R.kind !== 'survival' ? '. Go again!' : ''), W / 2, sub, 19, '#fff', 'center', 600);
+    fitText(res.o === 1 ? 'You win!' : res.o === -1 ? 'Computer wins' : 'Tie!', W / 2, my, big, res.o === 1 ? '#1dd1a1' : res.o === -1 ? '#ff6b6b' : '#feca57', W * 0.92, 900);
+    fitText(res.line + (res.o === 0 && R.kind !== 'survival' ? '. Go again!' : ''), W / 2, sub, 19, '#fff', W * 0.92, 600);
   } else if (R.phase === 'retry') {
-    text('Didn\'t catch that 🙈', W / 2, my, big * 0.7, '#fff', 'center', 800);
+    fitText('Didn\'t catch that 🙈', W / 2, my, big * 0.7, '#fff', W * 0.92, 800);
     textWrap('Show ✊ ✋ or ✌️ right after “Shoot!”, palm towards the camera', W / 2, sub, 16, 'rgba(255,255,255,.85)', W * 0.9, 21, 600);
   }
 }
 
 // ================= MENU / GAME OVER / OVERLAYS =================
 function menuDraw() {
-  const big = Math.min(64, W * 0.11), ty = H * 0.13;
+  const narrow = W < 720;                                  // phones: big 2-column tiles, picture on top
+  const big = Math.min(64, W * 0.11), ty = H * (narrow ? 0.1 : 0.13);
   text('Hand Games', W / 2, ty, big, '#fff', 'center', 800);
-  textWrap(mode === 'hand' ? 'Pinch 🤏 a button, or hold a fingertip on it for 1 second' : 'Tap a game to start',
-           W / 2, ty + big * 0.85, 17, 'rgba(255,255,255,.85)', W * 0.9, 22);
-  const games = [['🍉 Fruit Ninja', ninjaOptions], ['🎾 Tennis', tennisOptions], ['🧩 Puzzle', puzzleOptions],
-                 ['🧹 Tidy Up', tidyOptions], ['✌️ Rock Paper Scissors', rpsOptions]];
-  const cols = W >= 720 ? 2 : 1, gap = 14;                 // two columns on wider screens
-  const bw = Math.min(W * (cols === 2 ? 0.9 : 0.84), cols === 2 ? 640 : 440), bh = clamp(H * (cols === 2 ? 0.09 : 0.075), 48, 66);
-  const x = (W - bw) / 2, y0 = Math.max(H * 0.22, ty + big * 0.85 + 34), cw = (bw - gap * (cols - 1)) / cols;
+  const hint = mode === 'hand' ? 'Point ☝️ and hold still, or pinch 🤏' : 'Tap a game to start';
+  const n = textWrap(hint, W / 2, ty + big * 0.85, narrow ? 15 : 17, 'rgba(255,255,255,.85)', W * 0.9, 20);
+  const games = [['🍉', 'Fruit Ninja', ninjaOptions], ['🎾', 'Tennis', tennisOptions], ['🧩', 'Puzzle', puzzleOptions],
+                 ['🧹', 'Tidy Up', tidyOptions], ['✌️', 'Rock Paper Scissors', rpsOptions]];
+  const gap = narrow ? 16 : 14, bw = narrow ? W * 0.92 : Math.min(W * 0.9, 640);
+  const bh = narrow ? clamp(H * 0.13, 84, 124) : clamp(H * 0.09, 48, 66), lastH = narrow ? bh * 0.75 : bh;
+  const x = (W - bw) / 2, y0 = ty + big * 0.85 + (n - 1) * 20 + 32, cw = (bw - gap) / 2;
   games.forEach((g, i) => {
-    const row = Math.floor(i / cols), alone = cols === 2 && i === games.length - 1 && games.length % 2 === 1;   // odd one out: centred
-    addButton('m' + (i + 1), g[0], alone ? x + (bw - cw) / 2 : x + (i % cols) * (cw + gap), y0 + row * (bh + gap), cw, bh, g[1]);
+    const row = Math.floor(i / 2), y = y0 + row * (bh + gap);
+    const alone = i === games.length - 1 && games.length % 2 === 1;      // odd one out: full width on phones, centred on wide screens
+    if (narrow) addButton('m' + (i + 1), g[1], alone ? x : x + (i % 2) * (cw + gap), y, alone ? bw : cw, alone ? lastH : bh, g[2], false, g[0]);
+    else addButton('m' + (i + 1), g[0] + ' ' + g[1], alone ? x + (bw - cw) / 2 : x + (i % 2) * (cw + gap), y, cw, bh, g[2]);
   });
-  const sy = y0 + Math.ceil(games.length / cols) * (bh + gap), sbh = clamp(H * 0.065, 42, 50);
+  const rows = Math.ceil(games.length / 2), sy = y0 + (rows - 1) * (bh + gap) + lastH + gap + (narrow ? 4 : 0);
+  const sbh = narrow ? 52 : clamp(H * 0.065, 42, 50);
   const small = (mode === 'hand' ? [['🖐 Hand check', openHandCheck]] : []).concat([['⚙️ Settings', () => openSettings(goMenu)], ['🏆 Scores', openScores]]);
   const sw = (bw - 10 * (small.length - 1)) / small.length;
   small.forEach((sm, i) => addButton('ms' + i, sm[0], x + i * (sw + 10), sy, sw, sbh, sm[1]));
+  if (narrow) return;                                      // (no room for the descriptions on a phone)
   let y = sy + sbh + 30;
   ['Fruit Ninja: swipe fast through the fruit. Classic, or 60-second Arcade.',
    'Tennis: play a friend or the computer. Move your hand up and down.',
    'Puzzle: make a fist over a piece to grab it, open your hand to drop it.',
    'Tidy Up: remember the room, then put everything back where it belongs.',
-   'Rock Paper Scissors: beat the computer with your real hand shape.'].forEach(s => {
+   'Rock Paper Scissors: beat the computer with your real hand shape.'].forEach(t => {
     ctx.font = '500 15px ' + FONT;                         // only the lines that fit on the screen
-    const lines = Math.ceil(ctx.measureText(s).width / (W * 0.9) + 0.15);
+    const lines = Math.ceil(ctx.measureText(t).width / (W * 0.9) + 0.15);
     if (y + lines * 20 > H - 8) return;
-    y += textWrap(s, W / 2, y, 15, 'rgba(255,255,255,.75)', W * 0.9, 20) * 20 + 6;
+    y += textWrap(t, W / 2, y, 15, 'rgba(255,255,255,.75)', W * 0.9, 20) * 20 + 6;
   });
 }
 
@@ -2006,8 +2077,10 @@ const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,
                [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
 function drawPointers() {
   if (state === 'ninja') drawTrails();
+  const menuLike = paused || GAME_STATES.indexOf(state) < 0;    // menus, settings, game over: just the pointer ring, no other dots
   tips.forEach(tp => {
-    const rpsHand = state === 'rps' && tp.pts && !paused;      // (paused: normal dots, to press the pause buttons)
+    const tr = tp.pts ? tracks.find(x => x.id === tp.id) : null;
+    const rpsHand = state === 'rps' && tp.pts && !paused;
     if (tp.pts && !tp.assisted && state !== 'ninja') {        // faint outline of the hand (Rock Paper Scissors: green when a shape is recognised)
       ctx.strokeStyle = rpsHand ? (tp.shape ? 'rgba(29,209,161,.85)' : 'rgba(255,255,255,.6)') : 'rgba(255,255,255,.35)';
       ctx.lineWidth = rpsHand ? 3 : 2;
@@ -2015,8 +2088,13 @@ function drawPointers() {
     }
     if (rpsHand) return;
     if ((state === 'puzzle' || state === 'tidy') && tp.pts) { // puzzle / tidy up: an open hand or a fist at the middle of your palm
-      ctx.font = '44px ' + EMOJI_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '44px ' + EMOJI_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
       ctx.fillText(tp.grab ? '✊' : '✋', tp.palm.x, tp.palm.y);
+      if (tr && tr.hoverId) dwellRing(tp.palm, 32, tr);         // it's on a button: show the button filling up
+      return;
+    }
+    if (tp.pts && menuLike) {                                 // the pointer: a ring on your index fingertip
+      if (!tp.assisted) drawCursor(tp.fingers[1], tr, tp.pinch);
       return;
     }
     if (tp.pinch && tp.pinchPt) {                             // pinching: ring between thumb and index finger
@@ -2031,6 +2109,19 @@ function drawPointers() {
     });
     ctx.globalAlpha = 1;
   });
+}
+function dwellRing(c, r, tr) {                // green arc: how far the button under the pointer has filled up
+  const f = Math.min(1, (dwell[tr.hoverId] || 0) / setting('hold'));
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.lineWidth = 8; ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.stroke();
+  if (f > 0) { ctx.strokeStyle = '#1dd1a1'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(c.x, c.y, r, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2); ctx.stroke(); }
+  ctx.lineCap = 'butt';
+}
+function drawCursor(c, tr, pinching) {
+  dwellRing(c, 20, tr || {});
+  ctx.fillStyle = pinching ? '#1dd1a1' : '#feca57'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(c.x, c.y, pinching ? 11 : 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
 }
 function drawTrails() {
   const t = secs();
@@ -2092,8 +2183,8 @@ function frame(dt) {
   }
   if (paused) pauseDraw();
   drawBanner(dt);
-  drawPointers();
   drawButtons(dt);
+  drawPointers();                              // on top of the buttons, so you can always see where you're pointing
   drawToast(dt);
   updateStatus();
   const pv = GAME_STATES.indexOf(state) >= 0 ? '' : 'none', pl = paused ? '▶' : '⏸';

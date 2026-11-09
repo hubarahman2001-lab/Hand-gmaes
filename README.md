@@ -14,7 +14,8 @@ Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played wi
 - **Pause:** Fruit Ninja and tennis pause when your hand leaves the camera; ⏸ button for every game.
 - **High scores:** top 5 with names for each game and mode (kept on your device).
 - Fruit Ninja can use **two hands**; Tidy Up has an **Outlines** hint option.
-- Press buttons with a pinch 🤏, or hold a fingertip on them for a second.
+- Choosing things with your hand: point with your index finger (a ring shows where), then pinch 🤏 or hold still for a second. Only the button under the ring can be pressed. On touch screens, tap (sliding off a button cancels it).
+- Works on phones: big tiles on the menu, and every screen fits whether the phone is upright or on its side.
 - Sound effects, with a mute button at the top.
 - Tracks your thumb, index and ring fingertips. Works best on a laptop in Chrome or Edge.
 - No camera? Use **Play with touch / mouse**.
