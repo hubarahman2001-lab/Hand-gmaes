@@ -15,6 +15,8 @@ Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played wi
 - **High scores:** top 5 with names for each game and mode (kept on your device).
 - Fruit Ninja can use **two hands**; Tidy Up has an **Outlines** hint option.
 - Choosing things with your hand: point with your index finger (a ring shows where), then pinch 🤏 or hold still for a second. Only the button under the ring can be pressed. On touch screens, tap (sliding off a button cancels it).
+- The camera picture (your face) is only shown in Fruit Ninja and on the Hand check screen. Everywhere else you only see your hand's outline or a pointer on a plain background.
+- Tennis: only how high your hand is moves your paddle (left / right is ignored), and your hand isn't drawn: the paddle is what you move. In 2 players, a hand belongs to the player whose side it first appeared on, however far it moves sideways.
 - Fruit Ninja keeps you in the middle: a face finder checks where you are, and the camera view pans and zooms (up to about 1.8x) so you're centred on screen, like Center Stage on video calls. In the 2-player battle it frames both players. Other games show the whole camera picture. Can be switched off in Settings.
 - Fruit Ninja 2 players: split screen, Player 1 on the left half and Player 2 on the right. Both halves get the same fruit (mirrored), 60 seconds, two scores, and each player can save their score to the high scores. Your hands only slice fruit on your own half.
 - 2-player tennis follows up to 4 hands, so a player raising both hands can't hide the other player, and each player keeps their own side: the dividing line sits halfway between the two players' faces.

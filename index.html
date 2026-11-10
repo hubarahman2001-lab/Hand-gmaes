@@ -10,6 +10,7 @@
   /* camera picture: mirrored like a selfie and cropped to fill the screen */
   #v { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); opacity:0; }
   #v.on { opacity:1; }
+  #v { transition:opacity .4s; }
   #c { position:fixed; inset:0; width:100%; height:100%; touch-action:none; }
   #hud { position:fixed; top:10px; left:10px; right:10px; display:flex; justify-content:space-between; align-items:center; pointer-events:none; z-index:2; }
   #hud .right { display:flex; gap:8px; }
@@ -308,6 +309,8 @@ function toScreen(lm) {
   return { x: W * (1 - (lm.x - r.x) / r.w), y: H * (lm.y - r.y) / r.h };
 }
 function ninjaView() { return state === 'ninja' || (state === 'over' && overInfo && overInfo.game === 'ninja'); }   // the only place the view moves
+let camStarted = false;
+function cameraShown() { return mode === 'hand' && camStarted && (ninjaView() || state === 'check'); }   // where you see the camera picture
 function framingPlayers() { return N && N.kind === 'versus' ? 2 : 1; }   // whose faces to keep in view
 // The face finder only runs when it's needed: Fruit Ninja (to keep you in the middle) and 2-player tennis (to put the
 // dividing line between the two players; the view doesn't move there)
@@ -1407,8 +1410,8 @@ function startTennis(vsCpu) {
   serve(Math.random() < 0.5 ? 1 : -1);
   setMaxHands(vsCpu ? 1 : 4);                     // 2 players: room for 4 hands, in case someone raises both
   setScreen('tennis');
-  showBanner(vsCpu ? (mode === 'hand' ? 'You play on the left. Move your hand up and down.' : 'You play on the left. Drag up and down.')
-    : (mode === 'hand' ? 'Player 1 on the left, Player 2 on the right. Move your hand up and down.'
+  showBanner(vsCpu ? (mode === 'hand' ? 'You\'re the blue paddle. Raise or lower your hand to move it, anywhere in front of the camera.' : 'You play on the left. Drag up and down.')
+    : (mode === 'hand' ? 'Player 1 (blue) stands on the left, Player 2 (orange) on the right. Raise or lower your hand to move your paddle.'
                        : 'Player 1 drags on the left, Player 2 on the right.'));
 }
 
@@ -1421,8 +1424,8 @@ function serve(dir) {
 }
 
 function movePaddle(i, tp, dt) {
-  if (mode === 'hand') {      // a small hand movement covers the whole court
-    const m = clamp((tp.y - H * 0.15) / (H * 0.7), 0, 1);
+  if (mode === 'hand') {      // only how high your hand is counts (left / right is ignored). A small movement covers the whole court
+    const m = clamp(((tp.palm ? tp.palm.y : tp.y) - H * 0.15) / (H * 0.7), 0, 1);
     const target = T.ph / 2 + m * (H - T.ph);
     T.p[i].y += (target - T.p[i].y) * Math.min(1, dt * 20);
   } else {
@@ -1452,22 +1455,29 @@ function cpuMove(dt) {
 
 function tennisUpdate(dt) {
   const taken = [false, false];
-  if (T.cpu) {                                     // any hand / finger moves your paddle
-    if (tips[0]) { movePaddle(0, tips[0], dt); taken[0] = true; }
+  if (T.cpu) {                                     // any hand / finger moves your paddle (the one it had, else the highest)
+    const tp = tips.find(x => x.id === T.p[0].hand) || tips.slice().sort((a, b) => a.y - b.y)[0];
+    if (tp) { T.p[0].hand = tp.id; movePaddle(0, tp, dt); taken[0] = true; }
     cpuMove(dt); taken[1] = true;
   } else {                                         // 2 players: each player's hand moves their own paddle
-    // Which side a hand belongs to: the dividing line is halfway between the two players' faces (or the middle of
-    // the screen if they can't be seen), and a hand near the line stays with the player it belonged to.
+    // Which player a hand belongs to is decided by which side it first appears on: of the line halfway between the two
+    // players' faces (or the middle of the screen if they can't be seen). After that it stays with that player however
+    // far it moves sideways, because only up and down moves a paddle. (Touch: the half you touch.)
     if (mode === 'hand' && VIEW.faces2.length === 2 && secs() - VIEW.seen2 < 4) {
       const xs = VIEW.faces2.map(f => toScreen(f).x);
       T.split = clamp((xs[0] + xs[1]) / 2, W * 0.2, W * 0.8);
     }
-    const split = T.split || W / 2, sides = [[], []];
+    const split = T.split || W / 2, sides = [[], []], now = secs();
     tips.forEach(tp => {
-      const tr = mode === 'hand' ? tracks.find(x => x.id === tp.id) : null;
-      let i = tp.x < split ? 0 : 1;
-      if (tr && tr.side !== undefined && Math.abs(tp.x - split) < W * 0.08) i = tr.side;
-      if (tr) tr.side = i;
+      const tr = mode === 'hand' ? tracks.find(x => x.id === tp.id) : null, here = tp.x < split ? 0 : 1;
+      let i = here;
+      if (tr) {
+        if (tr.tSide === undefined) { tr.tSide = here; tr.tAway = 0; }
+        else if (here !== tr.tSide) {              // only if it stays over there a long time: the players swapped places
+          if (!tr.tAway) tr.tAway = now; else if (now - tr.tAway > 3) { tr.tSide = here; tr.tAway = 0; }
+        } else tr.tAway = 0;
+        i = tr.tSide;
+      }
       sides[i].push(tp);
     });
     [0, 1].forEach(i => {                          // the hand it had before, or else the highest (the one held up)
@@ -1532,7 +1542,9 @@ function tennisDraw() {
   T.p.forEach((p, i) => {
     ctx.save();
     ctx.shadowColor = cols[i]; ctx.shadowBlur = 15 + p.glow * 30; ctx.fillStyle = cols[i];
+    ctx.globalAlpha = p.has || (T.cpu && i === 1) ? 1 : 0.45 + 0.2 * Math.sin(secs() * 5);   // waiting for a hand: faded, pulsing
     ctx.beginPath(); ctx.roundRect(paddleX(i) - T.pw / 2, p.y - T.ph / 2, T.pw, T.ph, 8); ctx.fill();
+    if (p.has && mode === 'hand' && !(T.cpu && i === 1)) { ctx.shadowBlur = 0; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.stroke(); }   // a hand is on it
     ctx.restore();
     text(String(p.score), W * (i === 0 ? 0.25 : 0.75), 85, 64, cols[i]);
     const hint = names[i] + (p.has ? '' : (mode === 'hand' ? ': show your hand' : ': touch this side'));
@@ -2309,6 +2321,7 @@ const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,
 function drawPointers() {
   if (state === 'ninja') drawTrails();
   const menuLike = paused || GAME_STATES.indexOf(state) < 0;    // menus, settings, game over: just the pointer ring, no other dots
+  if (state === 'tennis' && mode === 'hand' && !paused) return;   // tennis: your hand isn't drawn, the paddle is what you move
   tips.forEach(tp => {
     const tr = tp.pts ? tracks.find(x => x.id === tp.id) : null;
     const rpsHand = state === 'rps' && tp.pts && !paused;
@@ -2392,7 +2405,11 @@ function frame(dt) {
   updateView(dt);
   if (mode === 'hand') { if (rafMotion) motionAssist(secs()); pruneTracks(secs()); }
   ctx.clearRect(0, 0, W, H);
-  if (mode === 'hand') { ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H); }   // dim the camera a bit
+  // The camera picture (your face!) is only shown where it helps: Fruit Ninja and the Hand check.
+  // Everywhere else you just see your hand's outline or pointer on a plain background.
+  const cam = cameraShown();
+  if (video.classList.contains('on') !== cam) video.classList.toggle('on', cam);
+  if (cam) { ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H); }   // dim the camera a bit
   else {
     const g = ctx.createLinearGradient(0, 0, 0, H);
     g.addColorStop(0, '#221a40'); g.addColorStop(1, '#0b0b10');
@@ -2563,7 +2580,7 @@ async function startCamera() {
       return;
     }
   }
-  video.classList.add('on');
+  camStarted = true;                           // (the picture itself is only shown where it's needed; see cameraShown)
   goBtn.textContent = 'Loading hand tracking…';
   showMsg('Loading the hand-tracking model. The first time can take 10–20 seconds.', 'info');
   try {
