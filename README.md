@@ -18,7 +18,7 @@ Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played wi
 - The camera picture (your face) is only shown in Fruit Ninja and on the Hand check screen. Everywhere else you only see your hand's outline or a pointer on a plain background.
 - Tennis: only how high your hand is moves your paddle (left / right is ignored), and your hand isn't drawn: the paddle is what you move. In 2 players, a hand belongs to the player whose side it first appeared on, however far it moves sideways.
 - Fruit Ninja keeps you in the middle: a face finder checks where you are, and the camera view pans and zooms (up to about 1.8x) so you're centred on screen, like Center Stage on video calls. In the 2-player battle it frames both players. Other games show the whole camera picture. Can be switched off in Settings.
-- Fruit Ninja 2 players: split screen, Player 1 on the left half and Player 2 on the right. Both halves get the same fruit (mirrored), 60 seconds, two scores, and each player can save their score to the high scores. Your hands only slice fruit on your own half.
+- Fruit Ninja 2 players: split screen, Player 1 on the left half and Player 2 on the right. Both halves get the same fruit (mirrored), 60 seconds, two scores, then it shows who won. 2-player games don't keep high scores. Your hands only slice fruit on your own half.
 - 2-player tennis follows up to 4 hands, so a player raising both hands can't hide the other player, and each player keeps their own side: the dividing line sits halfway between the two players' faces.
 - Works on phones: big tiles on the menu, and every screen fits whether the phone is upright or on its side.
 - Sound effects, with a mute button at the top.

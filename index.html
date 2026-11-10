@@ -770,7 +770,6 @@ function pauseDraw() {
 const BOARDS = {
   ninja_classic: { title: '🍉 Fruit Ninja: Classic', high: true, fmt: v => v + ' points' },
   ninja_arcade:  { title: '🍉 Fruit Ninja: Arcade', high: true, fmt: v => v + ' points' },
-  ninja_versus:  { title: '🍉 Fruit Ninja: 2 players', high: true, fmt: v => v + ' points' },
   tennis_cpu:    { title: '🎾 Tennis vs Computer', high: true, fmt: v => 'won ' + TENNIS_WIN + '–' + (TENNIS_WIN - v) },
   puzzle_6:      { title: '🧩 Puzzle: 6 pieces', high: false, fmt: v => fmtTime(v) },
   puzzle_12:     { title: '🧩 Puzzle: 12 pieces', high: false, fmt: v => fmtTime(v) },
@@ -782,6 +781,7 @@ const BOARDS = {
   rps_smart:     { title: '🧠 Rock Paper Scissors: Survival vs smart', high: true, fmt: v => v + (v === 1 ? ' win' : ' wins') },
 };
 const BOARD_ORDER = Object.keys(BOARDS);
+try { ['handgames_board_ninja_versus', 'handgames_name_p1', 'handgames_name_p2'].forEach(k => localStorage.removeItem(k)); } catch (e) {}   // (2-player scores from an earlier version)
 function boardGet(k) { try { return JSON.parse(load('handgames_board_' + k) || '[]'); } catch (e) { return []; } }
 function boardBest(k) { const b = boardGet(k); return b.length ? b[0].v : null; }
 function boardQualifies(k, v) {
@@ -805,36 +805,27 @@ function boardAdd(k, name, v) {
 
 // Name box: shown when a finished game makes the top 5
 const nameBox = document.getElementById('nameBox'), nameInput = document.getElementById('nameInput');
-let nameOpen = false, namePending = null, nameQueue = [];
+let nameOpen = false, namePending = null;
 function finishOver() {                       // show the game-over screen, and ask for a name if the score made the top 5
-  setScreen('over');
-  nameQueue = overInfo ? (overInfo.hsList || (overInfo.hs ? [overInfo.hs] : [])).slice() : [];   // 2-player games: one each
-  nextName();
-}
-function nameKey(hs) { return hs.slot ? 'handgames_name_p' + hs.slot : 'handgames_name'; }   // name remembered per player
-function nextName() {
-  if (state !== 'over') { nameQueue = []; return; }    // (left the game-over screen already)
-  while (nameQueue.length) {
-    const hs = nameQueue.shift();
-    if (!boardQualifies(hs.k, hs.v)) continue;
+  setScreen('over');                          // (2-player games have no high scores, so they never ask)
+  const hs = overInfo && overInfo.hs;
+  if (hs && boardQualifies(hs.k, hs.v)) {
     namePending = hs;
-    document.getElementById('nameSub').textContent = BOARDS[hs.k].title + ': ' + (hs.who ? hs.who + ', ' : '') + BOARDS[hs.k].fmt(hs.v);
-    nameInput.value = load(nameKey(hs)) || '';
+    document.getElementById('nameSub').textContent = BOARDS[hs.k].title + ': ' + BOARDS[hs.k].fmt(hs.v);
+    nameInput.value = load('handgames_name') || '';
     nameBox.style.display = 'flex'; nameOpen = true;
     setTimeout(() => { try { nameInput.focus(); } catch (e) {} }, 50);
-    return;
   }
 }
 function closeName(keep) {
   if (keep && namePending) {
-    const n = (nameInput.value || '').trim().slice(0, 12) || (namePending.slot ? 'Player ' + namePending.slot : 'Player');
-    save(nameKey(namePending), n);
+    const n = (nameInput.value || '').trim().slice(0, 12) || 'Player';
+    save('handgames_name', n);
     boardAdd(namePending.k, n, namePending.v);
     showToast('Saved to the high scores 🏆');
   }
   namePending = null; nameOpen = false; nameBox.style.display = 'none';
   screenAt = secs();                          // short pause before the game-over buttons respond
-  if (nameQueue.length) setTimeout(nextName, 150);   // the other player's turn
 }
 document.getElementById('nameSave').onclick = () => closeName(true);
 document.getElementById('nameSkip').onclick = () => closeName(false);
@@ -992,7 +983,7 @@ function ninjaOptions() {
     { label: settings.ninjaHands === 2 ? '🙌 Two hands: ON' : '✋ Two hands: OFF',
       act: () => { settings.ninjaHands = settings.ninjaHands === 2 ? 1 : 2; saveSettings(); ninjaOptions(); } }],
     note: 'Slice ❄️ to slow the fruit down and ⭐ for double points. Arcade has no lives, but bombs cost 10 points. ' +
-          '2 players: stand side by side, each slices the fruit on their own half (the same fruit on both sides), 60 seconds, two scores. ' +
+          '2 players: stand side by side, each slices the fruit on their own half (the same fruit on both sides). 60 seconds, then it shows who won. ' +
           'Two hands: both your hands slice in 1-player games, but tracking is a little slower.' });
 }
 function tennisOptions() {
@@ -1363,13 +1354,11 @@ function ninjaVsUpdate(dt) {
   });
   N.fruits = N.fruits.filter(f => !f.sliced && !(f.vy > 0 && f.y > H + f.r * 1.5));
 }
-function ninjaVsOver() {
+function ninjaVsOver() {                        // 2-player games keep no high scores: just who won
   const s = N.pl.map(q => q.score);
   overInfo = { game: 'ninja', again: () => startNinja('versus'),
                title: s[0] === s[1] ? '🤝 It\'s a tie!' : '🏆 Player ' + (s[0] > s[1] ? 1 : 2) + ' wins!',
-               lines: ['Player 1 (left): ' + s[0] + (s[0] === 1 ? ' point' : ' points'), 'Player 2 (right): ' + s[1] + (s[1] === 1 ? ' point' : ' points')],
-               hsList: [{ k: 'ninja_versus', v: s[0], who: 'Player 1 (left)', slot: 1 }, { k: 'ninja_versus', v: s[1], who: 'Player 2 (right)', slot: 2 }]
-                 .filter(h => h.v > 0).sort((a, b) => b.v - a.v) };     // the winner gets to type their name first
+               lines: ['Player 1: ' + s[0] + '   ·   Player 2: ' + s[1]] };
   sfx('win');
   finishOver();
 }
