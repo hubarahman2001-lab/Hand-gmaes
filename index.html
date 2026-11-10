@@ -283,11 +283,12 @@ function addSample(id, x, y, t) {
   while (tr.length > 1 && t - tr[0].t > 0.25) tr.shift();
 }
 
-// ================= CAMERA VIEW (keeps you in the middle) =================
-// The camera picture is shown mirrored and cropped to fill the screen. With "Keep me in the middle" on, a face finder
-// looks for you a few times a second, and the view slowly pans and zooms so you (or both tennis players) stay in the
+// ================= CAMERA VIEW (keeps you in the middle in Fruit Ninja) =================
+// The camera picture is shown mirrored and cropped to fill the screen. In Fruit Ninja (with "Keep me centred" on), a
+// face finder looks for you every second or so, and the view slowly pans and zooms so you (or both players) stay in the
 // middle of the screen, like "Center Stage" on video calls. Hands are mapped through the same view, so the whole
-// screen stays within comfortable reach. VIEW: zoom (1 = whole picture) and the point of the picture in the middle.
+// screen stays within comfortable reach. Everywhere else the whole camera picture is shown.
+// VIEW: zoom (1 = whole picture) and the point of the picture in the middle.
 const VIEW = { z: 1, cx: 0.5, cy: 0.5, tz: 1, tcx: 0.5, tcy: 0.5, faces: [], faces2: [], seen1: -99, seen2: -99, following: false, css: '' };
 const FRAME_REACH = 3.2;     // how far your hands reach each side of your face, in face widths
 const FRAME_MIN = 0.56;      // zoom in at most about 1.8x (more makes the picture blurry and the hand jumpy)
@@ -306,7 +307,11 @@ function toScreen(lm) {
   const r = VR || viewRect();
   return { x: W * (1 - (lm.x - r.x) / r.w), y: H * (lm.y - r.y) / r.h };
 }
-function framingPlayers() { return state === 'tennis' && T && !T.cpu ? 2 : 1; }   // whose faces to keep in view
+function ninjaView() { return state === 'ninja' || (state === 'over' && overInfo && overInfo.game === 'ninja'); }   // the only place the view moves
+function framingPlayers() { return N && N.kind === 'versus' ? 2 : 1; }   // whose faces to keep in view
+// The face finder only runs when it's needed: Fruit Ninja (to keep you in the middle) and 2-player tennis (to put the
+// dividing line between the two players; the view doesn't move there)
+function facesWanted() { return mode === 'hand' && (settings.autoFrame && ninjaView() || state === 'tennis' && T && !T.cpu); }
 function frameTarget(faces) {
   const b = baseView();
   let x0 = 1, x1 = 0, fy = 0;
@@ -320,7 +325,7 @@ function frameTarget(faces) {
 }
 function updateView(dt) {
   const t = secs(), b = baseView();
-  if (mode === 'hand' && settings.autoFrame && faceModel) {
+  if (mode === 'hand' && settings.autoFrame && faceModel && ninjaView()) {
     const two = framingPlayers() === 2, faces = two ? VIEW.faces2 : VIEW.faces.slice(0, 1), seen = two ? VIEW.seen2 : VIEW.seen1;
     const hold = Math.max(two ? 4 : 3, faceGap() * 2.5 / 1000);   // seconds to wait for a lost face before showing everything
     if (faces.length && t - seen < hold) {
@@ -610,6 +615,7 @@ function endPointer(e) {
   }
   pointers.delete(e.pointerId);
   delete trails['p' + e.pointerId];
+  if (N && N.touchSides) delete N.touchSides['p' + e.pointerId];   // 2-player Fruit Ninja: the next touch picks its side afresh
   syncPointerTips();
 }
 cv.addEventListener('pointerup', endPointer);
@@ -761,6 +767,7 @@ function pauseDraw() {
 const BOARDS = {
   ninja_classic: { title: '🍉 Fruit Ninja: Classic', high: true, fmt: v => v + ' points' },
   ninja_arcade:  { title: '🍉 Fruit Ninja: Arcade', high: true, fmt: v => v + ' points' },
+  ninja_versus:  { title: '🍉 Fruit Ninja: 2 players', high: true, fmt: v => v + ' points' },
   tennis_cpu:    { title: '🎾 Tennis vs Computer', high: true, fmt: v => 'won ' + TENNIS_WIN + '–' + (TENNIS_WIN - v) },
   puzzle_6:      { title: '🧩 Puzzle: 6 pieces', high: false, fmt: v => fmtTime(v) },
   puzzle_12:     { title: '🧩 Puzzle: 12 pieces', high: false, fmt: v => fmtTime(v) },
@@ -795,27 +802,36 @@ function boardAdd(k, name, v) {
 
 // Name box: shown when a finished game makes the top 5
 const nameBox = document.getElementById('nameBox'), nameInput = document.getElementById('nameInput');
-let nameOpen = false, namePending = null;
+let nameOpen = false, namePending = null, nameQueue = [];
 function finishOver() {                       // show the game-over screen, and ask for a name if the score made the top 5
   setScreen('over');
-  const hs = overInfo && overInfo.hs;
-  if (hs && boardQualifies(hs.k, hs.v)) {
+  nameQueue = overInfo ? (overInfo.hsList || (overInfo.hs ? [overInfo.hs] : [])).slice() : [];   // 2-player games: one each
+  nextName();
+}
+function nameKey(hs) { return hs.slot ? 'handgames_name_p' + hs.slot : 'handgames_name'; }   // name remembered per player
+function nextName() {
+  if (state !== 'over') { nameQueue = []; return; }    // (left the game-over screen already)
+  while (nameQueue.length) {
+    const hs = nameQueue.shift();
+    if (!boardQualifies(hs.k, hs.v)) continue;
     namePending = hs;
-    document.getElementById('nameSub').textContent = BOARDS[hs.k].title + ': ' + BOARDS[hs.k].fmt(hs.v);
-    nameInput.value = load('handgames_name') || '';
+    document.getElementById('nameSub').textContent = BOARDS[hs.k].title + ': ' + (hs.who ? hs.who + ', ' : '') + BOARDS[hs.k].fmt(hs.v);
+    nameInput.value = load(nameKey(hs)) || '';
     nameBox.style.display = 'flex'; nameOpen = true;
     setTimeout(() => { try { nameInput.focus(); } catch (e) {} }, 50);
+    return;
   }
 }
 function closeName(keep) {
   if (keep && namePending) {
-    const n = (nameInput.value || '').trim().slice(0, 12) || 'Player';
-    save('handgames_name', n);
+    const n = (nameInput.value || '').trim().slice(0, 12) || (namePending.slot ? 'Player ' + namePending.slot : 'Player');
+    save(nameKey(namePending), n);
     boardAdd(namePending.k, n, namePending.v);
     showToast('Saved to the high scores 🏆');
   }
   namePending = null; nameOpen = false; nameBox.style.display = 'none';
   screenAt = secs();                          // short pause before the game-over buttons respond
+  if (nameQueue.length) setTimeout(nextName, 150);   // the other player's turn
 }
 document.getElementById('nameSave').onclick = () => closeName(true);
 document.getElementById('nameSkip').onclick = () => closeName(false);
@@ -879,7 +895,7 @@ function settingsDraw() {
   });
   // on / off: keep me in the middle (sideways phone: in the empty spot of the second column)
   const sw = short ? slot(SETTING_DEFS.length) : { x: (W - totalW) / 2, y: top + SETTING_DEFS.length * rowH + 6 };
-  addButton('s_frame', settings.autoFrame ? '📷 Keep me in the middle: ON' : '📷 Keep me in the middle: OFF',
+  addButton('s_frame', settings.autoFrame ? '📷 Fruit Ninja: keep me centred: ON' : '📷 Fruit Ninja: keep me centred: OFF',
             sw.x, sw.y + (short ? (rowH - tb) / 2 : 0), colW, tb, () => { settings.autoFrame = !settings.autoFrame; saveSettings(); startFaceModel(); });
   y = short ? top + perCol * rowH : sw.y + tb;
   if (mode === 'hand' && !short && y + 130 < H) textWrap('Tip: 🖐 Hand check shows the fist and pinch meters, so you can see what each setting does.',
@@ -969,9 +985,12 @@ function ninjaOptions() {
   showOptions({ id: 'n', title: '🍉 Fruit Ninja', items: [
     { label: '❤️ Classic: 3 lives', act: () => startNinja('classic') },
     { label: '⏱ Arcade: 60 seconds', act: () => startNinja('arcade') },
+    { label: '⚔️ 2 players: split screen', act: () => startNinja('versus') },
     { label: settings.ninjaHands === 2 ? '🙌 Two hands: ON' : '✋ Two hands: OFF',
       act: () => { settings.ninjaHands = settings.ninjaHands === 2 ? 1 : 2; saveSettings(); ninjaOptions(); } }],
-    note: 'Slice ❄️ to slow the fruit down and ⭐ for double points. Arcade has no lives, but bombs cost 10 points. Two hands: both hands slice, but tracking is a little slower.' });
+    note: 'Slice ❄️ to slow the fruit down and ⭐ for double points. Arcade has no lives, but bombs cost 10 points. ' +
+          '2 players: stand side by side, each slices the fruit on their own half (the same fruit on both sides), 60 seconds, two scores. ' +
+          'Two hands: both your hands slice in 1-player games, but tracking is a little slower.' });
 }
 function tennisOptions() {
   showOptions({ id: 't', title: '🎾 Tennis', items: [
@@ -1069,12 +1088,15 @@ const ninjaBestKey = kind => (kind === 'arcade' ? 'handgames_ninja_arcade_best' 
 let N = null;
 
 function startNinja(kind) {
-  kind = kind === 'arcade' ? 'arcade' : 'classic';
+  kind = kind === 'arcade' || kind === 'versus' ? kind : 'classic';
   N = { kind: kind, fruits: [], halves: [], parts: [], pops: [], score: 0, lives: 3, spawnT: 0.8, timeLeft: ARCADE_TIME,
         freeze: 0, dbl: 0, best: +(load(ninjaBestKey(kind)) || 0), flash: 0, flashRGB: '255,80,80' };
-  setMaxHands(settings.ninjaHands);
+  if (kind === 'versus')                         // 2 players: each has their own score, slow motion, double points and flash
+    N.pl = [0, 1].map(() => ({ score: 0, freeze: 0, dbl: 0, flash: 0, flashRGB: '255,255,255' })), N.touchSides = {};
+  setMaxHands(kind === 'versus' ? 4 : settings.ninjaHands);
   setScreen('ninja');
-  showBanner(kind === 'arcade' ? '60 seconds: slice as much as you can! Bombs cost 10 points.'
+  showBanner(kind === 'versus' ? 'Player 1 on the left, Player 2 on the right. Slice the fruit on your own half! 60 seconds.'
+    : kind === 'arcade' ? '60 seconds: slice as much as you can! Bombs cost 10 points.'
     : mode === 'hand' ? 'Swipe fast through the fruit. Your thumb, index and ring finger all slice. Avoid the 💣'
     : 'Swipe through the fruit. Avoid the 💣');
 }
@@ -1123,7 +1145,8 @@ function bombBurst(f) {
     const a = rand(0, Math.PI * 2), s = rand(100, 600);
     N.parts.push({ x: f.x, y: f.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(0.5, 1.2), c: i % 2 ? '#ffd23f' : '#ff6b3b', r: rand(3, 8) });
   }
-  N.flash = 1; N.flashRGB = '255,255,255';
+  if (N.pl) { N.pl[f.side].flash = 1; N.pl[f.side].flashRGB = '255,255,255'; }   // 2 players: only that half flashes
+  else { N.flash = 1; N.flashRGB = '255,255,255'; }
   N.fruits = N.fruits.filter(x => x !== f);
   sfx('bomb');
 }
@@ -1138,6 +1161,7 @@ function ninjaOver(title) {
 }
 
 function ninjaUpdate(dt) {
+  if (N.kind === 'versus') { ninjaVsUpdate(dt); return; }
   const arcade = N.kind === 'arcade';
   if (arcade) {
     N.timeLeft -= dt;
@@ -1228,6 +1252,7 @@ function drawEmoji(e, x, y, r, rot, half) {
 }
 
 function ninjaDraw() {
+  if (N.kind === 'versus') { ninjaVsDraw(); return; }
   if (N.freeze > 0) { ctx.fillStyle = 'rgba(120,200,255,.13)'; ctx.fillRect(0, 0, W, H); }
   N.parts.forEach(p => { ctx.globalAlpha = clamp(p.life / 0.5, 0, 1); ctx.fillStyle = p.c; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill(); });
   ctx.globalAlpha = 1;
@@ -1248,6 +1273,127 @@ function ninjaDraw() {
   if (N.dbl > 0) chips.push('⭐ x2 ' + Math.ceil(N.dbl) + 's');
   if (chips.length) text(chips.join('     '), 16, 108, 20, '#fff', 'left', 700);
   if (N.flash > 0) { ctx.fillStyle = 'rgba(' + N.flashRGB + ',' + (N.flash * 0.4) + ')'; ctx.fillRect(0, 0, W, H); }
+}
+
+// ---------- Fruit Ninja for 2 players: the screen is split down the middle ----------
+// Player 1 plays on the left half, Player 2 on the right. Both halves get exactly the same fruit (mirrored) at the
+// same moments, so it's fair. 60 seconds, highest score wins. A hand belongs to the player on whose side it first
+// appeared and can only slice that side's fruit, so reaching across can't steal (or spoil) the other player's fruit.
+const VS_COLORS = ['84,160,255', '255,159,67'];          // Player 1 blue, Player 2 orange
+function vsSideOf(id, x) {
+  const tr = tracks.find(t => t.id === id), now = secs(), here = x < W / 2 ? 0 : 1;
+  const o = tr || N.touchSides[id] || (N.touchSides[id] = {});
+  if (o.vsSide === undefined) { o.vsSide = here; o.vsAway = 0; }
+  else if (here !== o.vsSide) {                         // over on the other side for a while: the players have swapped places
+    if (!o.vsAway) o.vsAway = now; else if (now - o.vsAway > 1.5) { o.vsSide = here; o.vsAway = 0; }
+  } else o.vsAway = 0;
+  return o.vsSide;
+}
+function spawnVsWave() {
+  const el = ARCADE_TIME - N.timeLeft;                  // seconds played: it gets busier over time, the same for both
+  const count = 1 + Math.floor(Math.random() * Math.min(4, 1 + el / 12));
+  const hw = W / 2, R = clamp(Math.min(hw, H) * 0.085, 24, 64), g = H * 1.2;
+  for (let i = 0; i < count; i++) {
+    const bomb = el > 4 && Math.random() < Math.min(0.15, 0.05 + el * 0.002);
+    const special = !bomb && Math.random() < 0.06 ? (Math.random() < 0.5 ? 'freeze' : 'double') : null;
+    const kind = FRUITS[Math.floor(Math.random() * FRUITS.length)];
+    const rx = rand(0.18, 0.85), rtx = rand(0.25, 0.75), vy = -Math.sqrt(2 * g * H * rand(0.5, 0.8)), tUp = -vy / g, vr = rand(-3, 3);
+    [0, 1].forEach(side => {                            // the same fruit on both halves, mirrored across the middle line
+      const xAt = r => side === 0 ? hw - r * hw : hw + r * hw, x0 = xAt(rx), tx = xAt(rtx);
+      N.fruits.push({ side: side, x: x0, y: H + R, vx: (tx - x0) / tUp, vy: vy, r: R, rot: 0, vr: side ? -vr : vr, bomb: bomb, special: special,
+                      emoji: bomb ? '💣' : special ? SPECIALS[special].emoji : kind[0], color: special ? SPECIALS[special].color : kind[1] });
+    });
+  }
+}
+function ninjaVsUpdate(dt) {
+  N.timeLeft -= dt;
+  if (N.timeLeft <= 0) { N.timeLeft = 0; ninjaVsOver(); return; }
+  N.pl.forEach(q => { q.freeze = Math.max(0, q.freeze - dt); q.dbl = Math.max(0, q.dbl - dt); q.flash = Math.max(0, q.flash - dt * 2); });
+  N.spawnT -= dt;
+  if (N.spawnT <= 0) { spawnVsWave(); N.spawnT = Math.max(0.6, 1.3 - (ARCADE_TIME - N.timeLeft) * 0.008) + Math.random() * 0.4; }
+
+  // what can cut this frame, and whose hand made each cut
+  const minSpeed = Math.max(250, Math.min(W, H) * 0.5) * setting('slice');
+  const sideOf = {};
+  tips.forEach(tp => { sideOf[tp.id] = vsSideOf(tp.id, tp.x); });
+  const cuts = [];
+  segQueue.forEach(sg => {
+    if (sg.speed < minSpeed) return;
+    const id = sg.id.split(':')[0];
+    cuts.push({ a: sg.a, b: sg.b, side: sideOf[id] !== undefined ? sideOf[id] : (sg.a.x + sg.b.x) / 2 < W / 2 ? 0 : 1 });
+  });
+  tips.forEach(tp => {                                  // a hand swiping fast is a wide blade (the gaps between fingertips)
+    if (!tp.pts || tp.fingers.length < 2) return;
+    let sp = 0;
+    segQueue.forEach(sg => { if (sg.id.indexOf(tp.id + ':') === 0) sp = Math.max(sp, sg.speed); });
+    if (sp < minSpeed) return;
+    for (let k = 1; k < tp.fingers.length; k++) cuts.push({ a: tp.fingers[k - 1], b: tp.fingers[k], side: sideOf[tp.id] });
+  });
+  const sliced = [0, 0], lastHit = [null, null];
+  for (const c of cuts) {
+    for (const f of N.fruits) {
+      if (f.sliced || f.side !== c.side || distToSeg(f, c.a, c.b) > f.r) continue;   // only your own half's fruit
+      f.sliced = true;
+      const q = N.pl[f.side];
+      if (f.bomb) { bombBurst(f); q.score = Math.max(0, q.score - 10); N.pops.push({ text: '💥 -10', x: f.x, y: f.y, life: 1.2 }); continue; }
+      if (f.special === 'freeze') { q.freeze = 5; N.pops.push({ text: '❄️ Slow motion!', x: f.x, y: f.y - 30, life: 1.4 }); sfx('special'); }
+      if (f.special === 'double') { q.dbl = 7; N.pops.push({ text: '⭐ Double points!', x: f.x, y: f.y - 30, life: 1.4 }); sfx('special'); }
+      sliced[f.side]++; q.score += q.dbl > 0 ? 2 : 1; lastHit[f.side] = f;
+      splitFruit(f, c);
+      sfx('slice');
+    }
+  }
+  [0, 1].forEach(i => {
+    if (sliced[i] < 3) return;
+    N.pl[i].score += sliced[i] * (N.pl[i].dbl > 0 ? 2 : 1);
+    N.pops.push({ text: 'Combo x' + sliced[i] + '!', x: lastHit[i].x, y: lastHit[i].y, life: 1.2 });
+    sfx('combo');
+  });
+
+  // move the fruit: each half has its own slow motion, and fruit stays on its own half
+  const g = H * 1.2, hw = W / 2;
+  N.fruits.forEach(f => {
+    const fdt = dt * (N.pl[f.side].freeze > 0 ? 0.35 : 1), x0 = f.side ? hw : 0, x1 = f.side ? W : hw;
+    f.vy += g * fdt; f.x += f.vx * fdt; f.y += f.vy * fdt; f.rot += f.vr * fdt;
+    if (f.x < x0 + f.r) { f.x = x0 + f.r; f.vx = Math.abs(f.vx); }
+    if (f.x > x1 - f.r) { f.x = x1 - f.r; f.vx = -Math.abs(f.vx); }
+  });
+  N.fruits = N.fruits.filter(f => !f.sliced && !(f.vy > 0 && f.y > H + f.r * 1.5));
+}
+function ninjaVsOver() {
+  const s = N.pl.map(q => q.score);
+  overInfo = { game: 'ninja', again: () => startNinja('versus'),
+               title: s[0] === s[1] ? '🤝 It\'s a tie!' : '🏆 Player ' + (s[0] > s[1] ? 1 : 2) + ' wins!',
+               lines: ['Player 1 (left): ' + s[0] + (s[0] === 1 ? ' point' : ' points'), 'Player 2 (right): ' + s[1] + (s[1] === 1 ? ' point' : ' points')],
+               hsList: [{ k: 'ninja_versus', v: s[0], who: 'Player 1 (left)', slot: 1 }, { k: 'ninja_versus', v: s[1], who: 'Player 2 (right)', slot: 2 }]
+                 .filter(h => h.v > 0).sort((a, b) => b.v - a.v) };     // the winner gets to type their name first
+  sfx('win');
+  finishOver();
+}
+function ninjaVsDraw() {
+  N.pl.forEach((q, i) => { if (q.freeze > 0) { ctx.fillStyle = 'rgba(120,200,255,.13)'; ctx.fillRect(i * W / 2, 0, W / 2, H); } });
+  ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 3; ctx.setLineDash([14, 12]);   // the middle line
+  ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke(); ctx.restore();
+  N.parts.forEach(p => { ctx.globalAlpha = clamp(p.life / 0.5, 0, 1); ctx.fillStyle = p.c; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill(); });
+  ctx.globalAlpha = 1;
+  N.halves.forEach(h => drawEmoji(h.emoji, h.x, h.y, h.r, h.rot, h.side));
+  N.fruits.forEach(f => {
+    if (f.special) { ctx.save(); ctx.shadowColor = SPECIALS[f.special].glow; ctx.shadowBlur = 24 + 10 * Math.sin(secs() * 8); drawEmoji(f.emoji, f.x, f.y, f.r, f.rot, 0); ctx.restore(); }
+    else drawEmoji(f.emoji, f.x, f.y, f.r, f.rot, 0);
+  });
+  N.pops.forEach(p => { ctx.globalAlpha = clamp(p.life, 0, 1); text(p.text, p.x, p.y, 24, '#ffe066'); });
+  ctx.globalAlpha = 1;
+  const narrow = W < 600, sz = narrow ? 24 : 32;
+  text((narrow ? 'P1 ' : 'Player 1  ') + N.pl[0].score, 16, 70, sz, 'rgb(' + VS_COLORS[0] + ')', 'left', 800);
+  text(N.pl[1].score + (narrow ? ' P2' : '  Player 2'), W - 16, 70, sz, 'rgb(' + VS_COLORS[1] + ')', 'right', 800);
+  text('⏱ ' + Math.ceil(N.timeLeft), W / 2, narrow ? 104 : 70, narrow ? 24 : 30, N.timeLeft < 10 ? '#ff6b6b' : '#fff', 'center', 800);
+  N.pl.forEach((q, i) => {                               // each player's power-ups, under their score
+    const chips = [];
+    if (q.freeze > 0) chips.push('❄️ ' + Math.ceil(q.freeze) + 's');
+    if (q.dbl > 0) chips.push('⭐ x2 ' + Math.ceil(q.dbl) + 's');
+    if (chips.length) text(chips.join('   '), i ? W - 16 : 16, 106, narrow ? 15 : 19, '#fff', i ? 'right' : 'left', 700);
+    if (q.flash > 0) { ctx.fillStyle = 'rgba(' + q.flashRGB + ',' + (q.flash * 0.4) + ')'; ctx.fillRect(i * W / 2, 0, W / 2, H); }
+  });
 }
 
 // ================= TENNIS (2 players, or you vs the computer) =================
@@ -2187,8 +2333,9 @@ function drawPointers() {
       ctx.beginPath(); ctx.arc(tp.pinchPt.x, tp.pinchPt.y, 16, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.globalAlpha = tp.assisted ? 0.5 : 1;                  // faded while following a fast swipe's blur
+    const pl = vsPlayerOf(tp.id);                             // 2-player Fruit Ninja: dots in the player's colour
     tp.fingers.forEach((f, k) => {                            // one coloured dot per tracked fingertip
-      ctx.fillStyle = tp.pts ? FINGER_COLORS[k] : '#feca57';
+      ctx.fillStyle = pl !== undefined ? 'rgb(' + VS_COLORS[pl] + ')' : tp.pts ? FINGER_COLORS[k] : '#feca57';
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5;
       ctx.beginPath(); ctx.arc(f.x, f.y, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     });
@@ -2208,11 +2355,16 @@ function drawCursor(c, tr, pinching) {
   ctx.fillStyle = pinching ? '#1dd1a1' : '#feca57'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5;
   ctx.beginPath(); ctx.arc(c.x, c.y, pinching ? 11 : 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
 }
+function vsPlayerOf(id) {                     // 2-player Fruit Ninja: which player a hand / finger belongs to (or undefined)
+  if (!(state === 'ninja' && N && N.kind === 'versus')) return undefined;
+  const o = tracks.find(x => x.id === id) || N.touchSides[id];
+  return o ? o.vsSide : undefined;
+}
 function drawTrails() {
   const t = secs();
   Object.keys(trails).forEach(id => {
-    const k = id.indexOf(':') > 0 ? +id.split(':')[1] : -1;
-    const rgb = k === 0 ? '84,160,255' : k === 2 ? '255,107,157' : '255,255,255';
+    const k = id.indexOf(':') > 0 ? +id.split(':')[1] : -1, pl = vsPlayerOf(id.split(':')[0]);
+    const rgb = pl !== undefined ? VS_COLORS[pl] : k === 0 ? '84,160,255' : k === 2 ? '255,107,157' : '255,255,255';
     const tr = trails[id].filter(q => t - q.t < 0.25);
     for (let i = 1; i < tr.length; i++) {
       const f = i / tr.length;
@@ -2348,7 +2500,7 @@ async function loadFaceModel() {
   return f;
 }
 function startFaceModel() {
-  if (faceModel || faceLoading || !handModel || !settings.autoFrame) return;
+  if (faceModel || faceLoading || !handModel) return;
   faceLoading = true;
   loadFaceModel().then(f => { faceModel = f; }).catch(e => console.warn('Face finder not available:', e.message))
     .then(() => { faceLoading = false; });
@@ -2438,7 +2590,7 @@ async function pump() {
   if (video.readyState >= 2) {
     try { await handModel.send({ image: video }); sendErrors = 0; }
     catch (e) { if (++sendErrors === 20) { console.error(e); trackingBroken = true; } }
-    if (faceModel && settings.autoFrame && mode === 'hand' && performance.now() - faceSentAt > faceGap()) {
+    if (faceModel && facesWanted() && performance.now() - faceSentAt > faceGap()) {
       const t0 = faceSentAt = performance.now();
       try { await faceModel.send({ image: video }); faceErrors = 0; }
       catch (e) { if (++faceErrors === 20) { console.warn('Face finder stopped:', e); faceModel = null; } }
