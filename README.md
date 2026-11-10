@@ -15,6 +15,8 @@ Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played wi
 - **High scores:** top 5 with names for each game and mode (kept on your device).
 - Fruit Ninja can use **two hands**; Tidy Up has an **Outlines** hint option.
 - Choosing things with your hand: point with your index finger (a ring shows where), then pinch 🤏 or hold still for a second. Only the button under the ring can be pressed. On touch screens, tap (sliding off a button cancels it).
+- Keeps you in the middle: a face finder checks where you are, and the camera view pans and zooms (up to about 1.8x) so you're centred on screen, like Center Stage on video calls. In 2-player tennis it frames both players. Can be switched off in Settings.
+- 2-player tennis follows up to 4 hands, so a player raising both hands can't hide the other player, and each player keeps their own side: the dividing line sits halfway between the two players.
 - Works on phones: big tiles on the menu, and every screen fits whether the phone is upright or on its side.
 - Sound effects, with a mute button at the top.
 - Tracks your thumb, index and ring fingertips. Works best on a laptop in Chrome or Edge.
