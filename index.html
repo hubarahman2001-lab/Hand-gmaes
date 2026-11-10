@@ -24,12 +24,20 @@
     text-align:center; display:flex; flex-direction:column; gap:12px; }
   #nameBox input { font-size:20px; padding:10px 14px; border-radius:12px; border:2px solid #a29bfe; background:#0b0b10; color:#fff; text-align:center; font-family:inherit; }
   #nameBox .row { display:flex; gap:10px; justify-content:center; }
-  #start { position:fixed; inset:0; z-index:3; display:flex; flex-direction:column; gap:14px; align-items:center; justify-content:center;
+  #start { position:fixed; inset:0; z-index:3; display:flex; flex-direction:column; gap:14px; align-items:center; justify-content:flex-start;
     background:radial-gradient(circle at 50% 30%, #2a2150, #0b0b10 70%); text-align:center; padding:24px; box-sizing:border-box; overflow:auto; }
   #start h1 { margin:0; font-size:40px; }
   #start p { max-width:400px; opacity:.85; line-height:1.5; margin:0; }
   #start .small { font-size:13px; opacity:.7; }
   #start button { font-size:18px; padding:14px 28px; min-width:260px; }
+  #start > :first-child { margin-top:auto; }      /* centred when it fits, scrolls (instead of being cut off) when it doesn't */
+  #start > :last-child { margin-bottom:auto; }
+  @media (max-height: 460px) {                      /* phone on its side */
+    #start { gap:8px; padding:12px 24px; }
+    #start h1 { font-size:28px; }
+    #start p { line-height:1.35; }
+    #start button { padding:10px 24px; font-size:16px; }
+  }
   #msg { display:none; max-width:420px; text-align:left; line-height:1.5; font-size:15px; padding:12px 16px; border-radius:12px; background:#3a1d24; border:1px solid #ff6b6b; }
   #msg.info { background:#1b2740; border-color:#54a0ff; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; border:2px solid #fff; vertical-align:-1px; }
@@ -56,6 +64,7 @@
   <button id="touch" class="ghost">Play with touch / mouse</button>
   <p class="small">Works best on a laptop in Chrome or Edge. Stand back so your whole hand is in view.
      A bright room helps a lot: light on your hand (not behind you) means less blur on fast swipes.</p>
+  <p class="small">🔒 Everything runs on this device: the camera picture is never recorded or sent anywhere.</p>
 </div>
 
 <script>
@@ -164,6 +173,12 @@ function fitText(t, x, y, size, color, maxW, weight) {     // like text(), but s
   ctx.font = (weight || 700) + ' ' + Math.round(size) + 'px ' + FONT;
   const w = ctx.measureText(t).width;
   text(t, x, y, w > maxW ? size * maxW / w : size, color, 'center', weight);
+}
+function wrapCount(t, size, maxW, weight) {     // how many lines textWrap would use
+  ctx.font = (weight || 500) + ' ' + Math.round(size) + 'px ' + FONT;
+  let n = 1, line = '';
+  t.split(' ').forEach(w => { const test = line ? line + ' ' + w : w; if (line && ctx.measureText(test).width > maxW) { n++; line = w; } else line = test; });
+  return n;
 }
 function textWrap(t, x, y, size, color, maxW, lineH, weight) {
   ctx.font = (weight || 500) + ' ' + Math.round(size) + 'px ' + FONT;
@@ -747,7 +762,8 @@ pauseBtn.onclick = () => { audioInit(); if (paused) resumeGame(); else pauseGame
 function autoPause() {
   if (mode !== 'hand') return;
   const t = secs();
-  if (!paused && (state === 'ninja' || state === 'tennis')) {
+  const gettingReady = readyWaiting(state === 'ninja' ? N && N.ready : state === 'tennis' ? T && T.ready : null);
+  if (!paused && (state === 'ninja' || state === 'tennis') && !gettingReady) {
     if (tips.length) lastHandAt = t;
     else if (t - lastHandAt > 1.5) pauseGame('auto');
   } else if (paused && paused.why === 'auto') {
@@ -926,6 +942,17 @@ function meter(label, f, mark, y) {
   ctx.fillStyle = f >= mark ? '#1dd1a1' : '#54a0ff'; ctx.beginPath(); ctx.roundRect(x, y, Math.max(14, w * f), 14, 7); ctx.fill();
   ctx.fillStyle = '#feca57'; ctx.fillRect(x + w * mark - 2, y - 5, 4, 24);
 }
+function fpsAdvice() {                       // what's holding the speed back, in plain words
+  if (drawFps && drawFps < 55) return 'The game should run at 60 fps: plug your laptop in, turn off battery saver, and close other tabs and apps.';
+  const cam = camFps || Math.round((camTrack && camTrack.getSettings().frameRate) || 0), max = camMaxFps();
+  if (trackFps >= 55) return 'Great.';
+  if (!cam) return '';
+  if (cam < trackFps + 5) {                    // the tracker keeps up with every picture: the camera is the limit
+    return max && max < 55 ? 'Your camera can only send ' + max + ' pictures a second; a webcam that does 60 fps would make it ' + (max < 40 ? 'much ' : '') + 'smoother.'
+         : 'Your camera is sending ' + cam + ' pictures a second' + (max >= 55 ? ' (it can do 60): more light helps, as cameras slow down in the dark.' : '.');
+  }
+  return 'The camera sends ' + cam + ' a second, but this device can\'t keep up: close other tabs and apps, or plug your laptop in.';
+}
 function checkDraw() {
   const short = H < 520;                       // phone on its side: everything a bit smaller and closer together
   const big = short ? Math.min(30, W * 0.06) : Math.min(44, W * 0.08);
@@ -942,7 +969,7 @@ function checkDraw() {
   if (g) seenG[g] = true;
   const lv = lightLevel();
   [tp ? '✅ Hand found' : '❌ No hand yet: hold your hand up in front of the camera',
-   'Tracking speed: ' + (trackFps ? trackFps + ' fps, ' + (trackFps >= 24 ? 'great' : trackFps >= 15 ? 'OK' : 'slow. Close other tabs and apps, or plug your laptop in') : 'measuring…'),
+   trackFps && drawFps ? 'Speed: game ' + drawFps + ' fps, hand read ' + trackFps + ' times a second. ' + fpsAdvice() : 'Speed: measuring…',
    'Light: ' + (lv < 0 ? 'measuring…' : lv < 55 ? 'too dark. Turn on a light or face a window' : lv < 85 ? 'a bit dark' : 'good')
   ].forEach(l => { y += short ? textWrap(l, W / 2, y + 12, 15, '#fff', W * 0.9, 18, 600) * 19 + 2 : textWrap(l, W / 2, y + 14, 16, '#fff', W * 0.9, 20, 600) * 22 + 4; });
   y += short ? 8 : 16;
@@ -1073,6 +1100,45 @@ function optionsDraw() {
   if (opt.note && y < H - 30) textWrap(opt.note, W / 2, y, short ? 14 : 15, 'rgba(255,255,255,.75)', Math.min(W * 0.9, short ? 720 : 520), short ? 18 : 20);
 }
 
+// ================= 2-PLAYER GAMES: GET READY =================
+// Before a 2-player game starts, both players get ready: with the camera each raises a hand on their own side, with
+// touch each holds a finger on their own half. Then 3, 2, 1, Go! Until then the clock and the ball wait.
+function readyStart() { return { phase: 'wait', ok: [false, false], hold: 0, t: 0, hint: '' }; }
+function readyWaiting(G) { return !!G && (G.phase === 'wait' || G.phase === 'count'); }
+function readyUpdate(G, dt, have) {            // have: does each player have a hand (or finger) on their side right now
+  if (G.phase === 'wait') {
+    G.ok = have.slice();
+    G.hold = have[0] && have[1] ? G.hold + dt : 0;
+    if (G.hold >= 0.6) { G.phase = 'count'; G.t = 3; sfx('beat'); }
+  } else if (G.phase === 'count') {
+    const before = Math.ceil(G.t);
+    G.t -= dt;
+    if (G.t <= 0) { G.phase = 'go'; G.t = 0.8; sfx('shoot'); }
+    else if (Math.ceil(G.t) < before) sfx('beat');
+  } else if (G.phase === 'go') { G.t -= dt; if (G.t <= 0) G.phase = 'play'; }
+}
+function readyDraw(G, cols) {
+  if (!G || G.phase === 'play') return;
+  if (G.phase === 'wait') {
+    fitText('Get ready!', W / 2, H * 0.25, Math.min(42, W * 0.08), '#fff', W * 0.9, 900);
+    let y = H * 0.25 + Math.min(50, H * 0.12);   // the how-to-play line (it stays up until both are ready)
+    if (G.hint) { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.9)'; ctx.shadowBlur = 10;
+      const sz = Math.min(20, W * 0.045), n = textWrap(G.hint, W / 2, y, sz, 'rgba(255,255,255,.85)', W * 0.8, sz * 1.3, 600);
+      ctx.restore(); y += (n - 1) * sz * 1.3; }
+    y = Math.max(H * 0.6, y + Math.min(60, H * 0.14));
+    [0, 1].forEach(i => {
+      const x = W * (i ? 0.75 : 0.25);
+      fitText('Player ' + (i + 1), x, y, Math.min(30, W * 0.06), cols[i], W * 0.44, 800);
+      fitText(G.ok[i] ? '✅ Ready' : mode === 'hand' ? '✋ Raise a hand' : '👆 Hold a finger here', x, y + Math.min(42, H * 0.07), Math.min(22, W * 0.045), '#fff', W * 0.44, 700);
+    });
+  } else {                                     // 3, 2, 1 (each pops in), then Go! fading out
+    const f = G.phase === 'count' ? G.t % 1 || 1 : G.t / 0.8;
+    ctx.save(); ctx.globalAlpha = G.phase === 'go' ? clamp(G.t / 0.4, 0, 1) : 1;
+    text(G.phase === 'count' ? String(Math.ceil(G.t)) : 'Go!', W / 2, H * 0.45, Math.min(120, H * 0.18) * (0.8 + 0.4 * f), '#feca57', 'center', 900);
+    ctx.restore();
+  }
+}
+
 // ================= FRUIT NINJA =================
 const FRUITS = [['🍉', '#ff4d6d'], ['🍎', '#ff3b3b'], ['🍊', '#ffa62b'], ['🍋', '#ffe066'],
                 ['🍍', '#ffd23f'], ['🍓', '#ff2e63'], ['🍑', '#ffab76'], ['🥝', '#9be564']];
@@ -1085,12 +1151,14 @@ function startNinja(kind) {
   kind = kind === 'arcade' || kind === 'versus' ? kind : 'classic';
   N = { kind: kind, fruits: [], halves: [], parts: [], pops: [], score: 0, lives: 3, spawnT: 0.8, timeLeft: ARCADE_TIME,
         freeze: 0, dbl: 0, best: +(load(ninjaBestKey(kind)) || 0), flash: 0, flashRGB: '255,80,80' };
-  if (kind === 'versus')                         // 2 players: each has their own score, slow motion, double points and flash
-    N.pl = [0, 1].map(() => ({ score: 0, freeze: 0, dbl: 0, flash: 0, flashRGB: '255,255,255' })), N.touchSides = {};
+  if (kind === 'versus') {                       // 2 players: each has their own score, slow motion, double points and flash
+    N.pl = [0, 1].map(() => ({ score: 0, freeze: 0, dbl: 0, flash: 0, flashRGB: '255,255,255' }));
+    N.touchSides = {}; N.ready = readyStart();    // the clock starts once both players are ready
+    N.ready.hint = 'Slice only the fruit on your own half! 60 seconds.';
+  }
   setMaxHands(kind === 'versus' ? 4 : settings.ninjaHands);
   setScreen('ninja');
-  showBanner(kind === 'versus' ? 'Player 1 on the left, Player 2 on the right. Slice the fruit on your own half! 60 seconds.'
-    : kind === 'arcade' ? '60 seconds: slice as much as you can! Bombs cost 10 points.'
+  if (kind !== 'versus') showBanner(kind === 'arcade' ? '60 seconds: slice as much as you can! Bombs cost 10 points.'
     : mode === 'hand' ? 'Swipe fast through the fruit. Your thumb, index and ring finger all slice. Avoid the 💣'
     : 'Swipe through the fruit. Avoid the 💣');
 }
@@ -1300,6 +1368,10 @@ function spawnVsWave() {
   }
 }
 function ninjaVsUpdate(dt) {
+  const sideOf = {};                                    // whose hand (or finger) each one is
+  tips.forEach(tp => { sideOf[tp.id] = vsSideOf(tp.id, tp.x); });
+  readyUpdate(N.ready, dt, [0, 1].map(i => tips.some(tp => sideOf[tp.id] === i)));
+  if (readyWaiting(N.ready)) return;                    // no fruit and no clock until both players are ready
   N.timeLeft -= dt;
   if (N.timeLeft <= 0) { N.timeLeft = 0; ninjaVsOver(); return; }
   N.pl.forEach(q => { q.freeze = Math.max(0, q.freeze - dt); q.dbl = Math.max(0, q.dbl - dt); q.flash = Math.max(0, q.flash - dt * 2); });
@@ -1308,8 +1380,6 @@ function ninjaVsUpdate(dt) {
 
   // what can cut this frame, and whose hand made each cut
   const minSpeed = Math.max(250, Math.min(W, H) * 0.5) * setting('slice');
-  const sideOf = {};
-  tips.forEach(tp => { sideOf[tp.id] = vsSideOf(tp.id, tp.x); });
   const cuts = [];
   segQueue.forEach(sg => {
     if (sg.speed < minSpeed) return;
@@ -1386,6 +1456,7 @@ function ninjaVsDraw() {
     if (chips.length) text(chips.join('   '), i ? W - 16 : 16, 106, narrow ? 15 : 19, '#fff', i ? 'right' : 'left', 700);
     if (q.flash > 0) { ctx.fillStyle = 'rgba(' + q.flashRGB + ',' + (q.flash * 0.4) + ')'; ctx.fillRect(i * W / 2, 0, W / 2, H); }
   });
+  readyDraw(N.ready, VS_COLORS.map(c => 'rgb(' + c + ')'));
 }
 
 // ================= TENNIS (2 players, or you vs the computer) =================
@@ -1398,10 +1469,11 @@ function startTennis(vsCpu) {
         ph: clamp(H * 0.22, 80, 200), pw: 16, ball: null, wait: 0, rally: 0, best: 0, trail: [], cpuErr: 0 };
   serve(Math.random() < 0.5 ? 1 : -1);
   setMaxHands(vsCpu ? 1 : 4);                     // 2 players: room for 4 hands, in case someone raises both
+  T.ready = vsCpu ? null : readyStart();           // 2 players: the ball waits until both are ready
   setScreen('tennis');
-  showBanner(vsCpu ? (mode === 'hand' ? 'You\'re the blue paddle. Raise or lower your hand to move it, anywhere in front of the camera.' : 'You play on the left. Drag up and down.')
-    : (mode === 'hand' ? 'Player 1 (blue) stands on the left, Player 2 (orange) on the right. Raise or lower your hand to move your paddle.'
-                       : 'Player 1 drags on the left, Player 2 on the right.'));
+  if (vsCpu) showBanner(mode === 'hand' ? 'You\'re the blue paddle. Raise or lower your hand to move it, anywhere in front of the camera.' : 'You play on the left. Drag up and down.');
+  else T.ready.hint = mode === 'hand' ? 'Player 1 (blue) stands on the left, Player 2 (orange) on the right. Raise or lower your hand to move your paddle.'
+                                      : 'Player 1 drags on the left, Player 2 on the right.';
 }
 
 function serve(dir) {
@@ -1414,7 +1486,9 @@ function serve(dir) {
 
 function movePaddle(i, tp, dt) {
   if (mode === 'hand') {      // only how high your hand is counts (left / right is ignored). A small movement covers the whole court
-    const m = clamp(((tp.palm ? tp.palm.y : tp.y) - H * 0.15) / (H * 0.7), 0, 1);
+    const hy = tp.palm ? tp.palm.y : tp.y;
+    T.p[i].handY = hy; T.p[i].handAt = secs();      // (for the arrows when your hand gets near the camera's edge)
+    const m = clamp((hy - H * 0.15) / (H * 0.7), 0, 1);
     const target = T.ph / 2 + m * (H - T.ph);
     T.p[i].y += (target - T.p[i].y) * Math.min(1, dt * 20);
   } else {
@@ -1478,6 +1552,11 @@ function tennisUpdate(dt) {
     });
   }
   T.p.forEach((p, i) => { p.has = taken[i]; p.y = clamp(p.y, T.ph / 2, H - T.ph / 2); p.glow = Math.max(0, p.glow - dt * 3); });
+  if (T.ready && T.ready.phase !== 'play') {       // 2 players: paddles already move, the ball waits for 3-2-1-Go
+    readyUpdate(T.ready, dt, [T.p[0].has, T.p[1].has]);
+    if (readyWaiting(T.ready)) return;
+    if (T.wait > 0.2) T.wait = 0.2;                 // (no extra "Ready…" after the countdown)
+  }
 
   if (T.wait > 0) { T.wait -= dt; return; }
   const b = T.ball;
@@ -1538,6 +1617,7 @@ function tennisDraw() {
     text(String(p.score), W * (i === 0 ? 0.25 : 0.75), 85, 64, cols[i]);
     const hint = names[i] + (p.has ? '' : (mode === 'hand' ? ': show your hand' : ': touch this side'));
     text(hint, W * (i === 0 ? 0.25 : 0.75), H - 28, 15, '#fff', 'center', 600);
+    if (mode === 'hand' && !(T.cpu && i === 1)) tennisArrow(i, p);
   });
   const b = T.ball;
   T.trail.forEach((q, k) => {
@@ -1549,7 +1629,29 @@ function tennisDraw() {
   ctx.save(); ctx.shadowColor = '#feca57'; ctx.shadowBlur = 25; ctx.fillStyle = '#feca57';
   ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill(); ctx.restore();
   if (T.rally >= 2) text('Rally ' + T.rally, W / 2, 140, 20, 'rgba(255,255,255,.85)', 'center', 600);
-  if (T.wait > 0 && state === 'tennis') text(T.wait > 0.6 ? 'Ready…' : 'Go!', W / 2, H / 2 - 70, 44);
+  if (T.wait > 0 && state === 'tennis' && !readyWaiting(T.ready)) text(T.wait > 0.6 ? 'Ready…' : 'Go!', W / 2, H / 2 - 70, 44);
+  readyDraw(T.ready, cols);
+}
+// The camera picture isn't shown in tennis, so you can't see when your hand drifts out of its view: an arrow by your
+// paddle says which way to move your hand (when it's close to the top or bottom edge, or has just gone past it)
+function tennisArrow(i, p) {
+  const hy = p.handY, ago = secs() - (p.handAt || -99);
+  p.arrow = '';
+  if (hy === undefined) return;
+  let dir = 0, msg = '';
+  if (p.has && hy > H * 0.92) { dir = -1; msg = 'Hand near the bottom of the camera'; }
+  else if (p.has && hy < H * 0.06) { dir = 1; msg = 'Hand near the top of the camera'; }
+  else if (!p.has && ago < 8 && hy > H * 0.6) { dir = -1; msg = 'Raise your hand: it went below the camera'; }
+  else if (!p.has && ago < 8 && hy < H * 0.4) { dir = 1; msg = 'Lower your hand: it went above the camera'; }
+  if (!dir) return;
+  p.arrow = msg;
+  // beside the paddle, kept clear of the score at the top and the player's name at the bottom
+  const left = i === 0, ax = paddleX(i) + (left ? 52 : -52), n0 = paddleX(0) + 32;   // (the text starts here and stays on its own half)
+  const tw = Math.max(90, Math.min(260, W / 2 - 14 - n0)), n = wrapCount(msg, 14, tw, 700);
+  const ay = clamp(p.y, 160, H - 70 - 38 - (n - 1) * 18) + Math.sin(secs() * 7) * 9 * dir;
+  ctx.font = '46px ' + EMOJI_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+  ctx.fillText(dir < 0 ? '⬆️' : '⬇️', ax, ay);
+  textWrap(msg, left ? ax - 20 + tw / 2 : ax + 20 - tw / 2, ay + 38, 14, '#fff', tw, 18, 700);
 }
 
 // ================= JIGSAW PUZZLE =================
@@ -2384,7 +2486,7 @@ function updateStatus() {
     else if (performance.now() - lastResultAt > 2500) { tips = []; tracks = []; setStatus('⏳ Waiting for hand tracking…'); }
     else setStatus((tips.length ? '✋ ' + tips.length + (tips.length > 1 ? ' hands' : ' hand') : '👀 Show your hand') +
                    (tips.some(tp => tp.assisted) ? ' ⚡' : '') + (tips.some(tp => tp.grab) ? ' ✊' : '') +
-                   (tips.some(tp => tp.pinch) ? ' 🤏' : '') + (VIEW.following ? ' 📷' : '') + (trackFps ? ' · ' + trackFps + ' fps' : ''));
+                   (tips.some(tp => tp.pinch) ? ' 🤏' : '') + (VIEW.following ? ' 📷' : '') + (drawFps ? ' · ' + drawFps + ' fps' : ''));
   } else if (mode === 'touch') setStatus('👆 Touch / mouse mode');
 }
 
@@ -2435,8 +2537,11 @@ function frame(dt) {
   if (pauseBtn.style.display !== pv) pauseBtn.style.display = pv;
   if (pauseBtn.textContent !== pl) pauseBtn.textContent = pl;
 }
+let drawFrames = 0, drawFpsAt = 0, drawFps = 0;   // how many times a second the game is drawn: the fps on the status pill
 function loop() {
   const t = performance.now();
+  drawFrames++;
+  if (t - drawFpsAt >= 1000) { drawFps = drawFpsAt ? Math.round(drawFrames * 1000 / (t - drawFpsAt)) : 0; drawFrames = 0; drawFpsAt = t; }
   realDt = (t - lastFrame) / 1000;
   const dt = Math.min(0.05, realDt);
   lastFrame = t;
@@ -2562,6 +2667,7 @@ async function startCamera() {
       video.srcObject = stream;
       try { await video.play(); } catch (e) {}
       await waitForVideo(8000);
+      await aimFor60(stream);
     } catch (err) {
       console.warn('Camera error:', err);
       goBtn.disabled = false; goBtn.textContent = 'Try camera again';
@@ -2587,13 +2693,56 @@ async function startCamera() {
   if (!load('handgames_checked')) { save('handgames_checked', '1'); openHandCheck(); }   // first time: check your hand
   else goMenu();
   startMotionLoop();
+  watchCamFrames();
   if (!pumping) { pumping = true; pump(); }
   startFaceModel();                            // downloads in the background; until then the whole picture is shown
 }
 
-// Send camera frames to the hand tracker, one at a time
+// The camera sets the limit: tracking can't look at more pictures than the camera sends. Most built-in laptop cameras
+// send 30 a second; many webcams can send 60. If this one says it can do 60 but started slower, ask for 60 again
+// (some cameras only do 60 at a bigger picture size, which the hand tracker handles fine).
+let camTrack = null;
+async function aimFor60(stream) {
+  camTrack = stream.getVideoTracks()[0] || null;
+  if (!camTrack || !camTrack.getCapabilities) return;
+  const max = ((camTrack.getCapabilities() || {}).frameRate || {}).max || 0;
+  if ((camTrack.getSettings().frameRate || 0) >= 55 || max < 59) return;
+  for (const c of [{ width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { min: 59 } },
+                   { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { min: 59 } }]) {
+    try { await camTrack.applyConstraints(c); const st = camTrack.getSettings(); if ((st.frameRate || 0) >= 55 && (st.width || 640) >= 480) return; } catch (e) {}
+  }
+  try { await camTrack.applyConstraints({ width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } }); } catch (e) {}
+}
+function camMaxFps() { try { return Math.round(((camTrack.getCapabilities() || {}).frameRate || {}).max || 0); } catch (e) { return 0; } }
+
+// Count the pictures the camera actually sends, and flag each new one so it's looked at exactly once
+let camNew = true, camSignalAt = 0, camFrames = 0, camFps = 0, camFpsAt = 0;
+function watchCamFrames() {
+  if (!video.requestVideoFrameCallback || watchCamFrames.on) return;
+  watchCamFrames.on = true;
+  const f = () => {
+    const now = performance.now();
+    camNew = true; camSignalAt = now; camFrames++;
+    if (now - camFpsAt >= 1000) { camFps = camFpsAt ? Math.round(camFrames * 1000 / (now - camFpsAt)) : 0; camFrames = 0; camFpsAt = now; }
+    video.requestVideoFrameCallback(f);
+  };
+  video.requestVideoFrameCallback(f);
+}
+
+// Send camera pictures to the hand tracker, one at a time: each new picture once. (Looking at the same picture twice
+// finds nothing new: it only wastes time and makes the next new picture wait.) If the browser stops saying when a new
+// picture arrives, look once per screen refresh instead.
+function camRate() { try { return (camTrack && camTrack.getSettings().frameRate) || 0; } catch (e) { return 0; } }
+function camFrameIsNew() {
+  if (camNew || !watchCamFrames.on) return true;
+  const rate = camRate();
+  // Some browsers send the signal less often while the camera picture is hidden: then don't trust it, look every time
+  if (rate && camFps < rate * 0.7) return true;
+  return performance.now() - camSignalAt > (rate ? Math.min(250, 2500 / rate) : 250);   // no signal for 2.5 pictures: look anyway
+}
 async function pump() {
-  if (video.readyState >= 2) {
+  if (video.readyState >= 2 && camFrameIsNew()) {
+    camNew = false;
     try { await handModel.send({ image: video }); sendErrors = 0; }
     catch (e) { if (++sendErrors === 20) { console.error(e); trackingBroken = true; } }
     if (faceModel && facesWanted() && performance.now() - faceSentAt > faceGap()) {

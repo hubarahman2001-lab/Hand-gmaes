@@ -9,7 +9,7 @@ Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played wi
 - **Puzzle:** 6, 12 or 24 pieces, with the kitten picture or your own photo (stays on your device). Make a fist over a piece to grab it, open your hand to drop it.
 - **Tidy Up:** remember the cozy room, then everything gets thrown around. Make a fist to pick things up and put them back where they belong. Easy, Normal or Hard, with a 👀 Peek button.
 - **Rock Paper Scissors:** you against the computer, read from your real hand shape. Make a fist to start a round, then show ✊ ✋ or ✌️ on "Shoot!". Best of 3, Best of 5, or Survival (3 lives). The computer picks before you throw; the **smart computer** learns your habits.
-- **Hand check:** see whether the camera picks up your open hand, fist and pinch, plus tracking speed and light.
+- **Hand check:** see whether the camera picks up your open hand, fist and pinch, plus the game speed, how often your hand is read, what's holding either back, and light.
 - **Settings:** slicing speed, fist and pinch sensitivity, steadiness and button hold time (saved on your device).
 - **Pause:** Fruit Ninja and tennis pause when your hand leaves the camera; ⏸ button for every game.
 - **High scores:** top 5 with names for each game and mode (kept on your device).
@@ -20,6 +20,10 @@ Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played wi
 - Fruit Ninja keeps you in the middle: a face finder checks where you are, and the camera view pans and zooms (up to about 1.8x) so you're centred on screen, like Center Stage on video calls. In the 2-player battle it frames both players. Other games show the whole camera picture. Can be switched off in Settings.
 - Fruit Ninja 2 players: split screen, Player 1 on the left half and Player 2 on the right. Both halves get the same fruit (mirrored), 60 seconds, two scores, then it shows who won. 2-player games don't keep high scores. Your hands only slice fruit on your own half.
 - 2-player tennis follows up to 4 hands, so a player raising both hands can't hide the other player, and each player keeps their own side: the dividing line sits halfway between the two players' faces.
+- 2-player games start with **Get ready!**: each player raises a hand (or holds a finger on their half with touch), then 3, 2, 1, Go!
+- Tennis shows an arrow when your hand is near the top or bottom of the camera, or has gone out of view, saying which way to move it.
+- **Speed:** the fps on the status pill is the game's frame rate (60 on a normal screen). Your hand is read every time the camera sends a new picture, and the game asks the camera for 60 a second. Most built-in webcams only send 30, so a 60 fps webcam (and good light) is needed for 60 hand readings a second.
+- **Privacy:** everything runs on your device. The camera picture is never recorded or sent anywhere.
 - Works on phones: big tiles on the menu, and every screen fits whether the phone is upright or on its side.
 - Sound effects, with a mute button at the top.
 - Tracks your thumb, index and ring fingertips. Works best on a laptop in Chrome or Edge.
