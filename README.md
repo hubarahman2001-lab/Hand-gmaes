@@ -24,6 +24,7 @@ Fruit Ninja, tennis, a jigsaw puzzle, Tidy Up and Rock Paper Scissors, played wi
 - Tennis shows an arrow when your hand is near the top or bottom of the camera, or has gone out of view, saying which way to move it.
 - **Speed:** the fps on the status pill is the game's frame rate (60 on a normal screen). Your hand is read every time the camera sends a new picture, and the game asks the camera for 60 a second. Most built-in webcams only send 30, so a 60 fps webcam (and good light) is needed for 60 hand readings a second.
 - **Privacy:** everything runs on your device. The camera picture is never recorded or sent anywhere.
+- **LMS version (SCORM 1.2):** the same games as a course package for learning platforms. It marks the course complete when any game is finished, carries its own copy of the hand tracker, and opens the games in their own tab if the platform's frame blocks the camera.
 - Works on phones: big tiles on the menu, and every screen fits whether the phone is upright or on its side.
 - Sound effects, with a mute button at the top.
 - Tracks your thumb, index and ring fingertips. Works best on a laptop in Chrome or Edge.
